@@ -310,6 +310,17 @@ helm::install::kro() {
         "$@"
 }
 
+kcp::kubeconfig::workspace() {
+    local src="$1"
+    local dst="$2"
+    local ws_path="$3"
+    local incluster_host="$4"
+    cp "$src" "$dst"
+
+    yq -i ".clusters[].cluster.server = \"https://${incluster_host}/clusters/${ws_path}\"" \
+        "$dst" || die "Failed to scope $dst to workspace $ws_path"
+}
+
 helm::install::kro::workspace() {
     local host_kubeconfig="$1"
     local release="$2"
