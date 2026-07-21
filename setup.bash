@@ -1,15 +1,191 @@
 #!/usr/bin/env bash
 
-KIND_CLUSTER="${KIND_CLUSTER:-apiextraction}"
+set -eu
 
-_kind() {
-    if ! kind get clusters | grep -q "$KIND_CLUSTER"; then
-        kind create cluster "$KIND_CLUSTER"
+cd "$(dirname "$0")"
+source ./hack/lib.bash
+
+KIND_CLUSTER="${KIND_CLUSTER:-platform-mesh}"
+# Platform Mesh local-setup specifics (the kcp-operator install).
+PM_NAMESPACE="${PM_NAMESPACE:-platform-mesh-system}"
+PM_ADMIN_SECRET="${PM_ADMIN_SECRET:-kubeconfig-kcp-admin}"
+# In-cluster front-proxy service the broker pod talks to.
+PM_KCP_INCLUSTER="${PM_KCP_INCLUSTER:-frontproxy-front-proxy.platform-mesh-system:8443}"
+
+kubeconfigs="$PWD/kubeconfigs"
+mkdir -p "$kubeconfigs/workspaces"
+
+kind_platform="$PWD/kind.kubeconfig"
+kcp_admin="$kubeconfigs/kcp-admin.kubeconfig"
+
+ws="$kubeconfigs/workspaces"
+ws_rb="$ws/resource-broker.kubeconfig"          # root:resource-broker (holds the Provider CR)
+ws_provider="$ws/provider.kubeconfig"           # provisioned root:providers:resource-broker-* (host-reachable)
+ws_consumer="$ws/consumer.kubeconfig"
+
+_kubeconfig() {
+    if ! kind get clusters | grep -q "^$KIND_CLUSTER$"; then
+        die "No kind cluster '$KIND_CLUSTER' found — start the Platform Mesh local-setup first"
     fi
-
-    kind export kubeconfig --name "$KIND_CLUSTER" --kubeconfig ./kind.kubeconfig
-
-    kubectl apply --kubeconfig ./kind.kubeconfig -k ./kind/manifests
+    kind export kubeconfig --name "$KIND_CLUSTER" --kubeconfig "$kind_platform"
 }
 
-_kind
+_kcp() {
+    log "Extracting kcp admin kubeconfig from the local-setup"
+    # The Platform Mesh local-setup exposes kcp directly at its external
+    # hostname (kcp.api.portal.localhost:8443), reachable from the host — no
+    # port-forward needed, unlike the standalone broker-postgres example.
+    kubectl --kubeconfig "$kind_platform" -n "$PM_NAMESPACE" \
+        get secret "$PM_ADMIN_SECRET" -o jsonpath='{.data.kubeconfig}' \
+        | base64 -d > "$kcp_admin" \
+        || die "Failed to read $PM_ADMIN_SECRET from $PM_NAMESPACE"
+    KUBECONFIG="$kcp_admin" kubectl ws . >/dev/null \
+        || die "Cannot reach kcp with the admin kubeconfig"
+}
+
+# workspace::create <parent-kubeconfig> <target-kubeconfig> <name>
+# Creates <name> under the parent workspace and writes a kubeconfig entered into
+# it. Uses the kcp kubectl plugins against the directly-reachable external URL.
+workspace::create() {
+    local parent="$1" target="$2" name="$3"
+    cp "$parent" "$target"
+    KUBECONFIG="$target" kubectl create-workspace "$name" --enter --ignore-existing \
+        || die "Failed to create workspace $name"
+    KUBECONFIG="$target" kubectl wait --for=jsonpath='{.status.phase}=Ready' \
+        workspace "$name" --timeout="$timeout" 2>/dev/null || true
+}
+
+# _provider_workspace onboards resource-broker as a Platform Mesh Provider:
+# create root:resource-broker, bind the providers API, create the Provider CR,
+# and let the providers-operator provision the marketplace-visible provider
+# workspace (root:providers:resource-broker-*) plus a scoped kubeconfig.
+_provider_workspace() {
+    log "Creating root:resource-broker and binding the providers API"
+    workspace::create "$kcp_admin" "$ws_rb" "resource-broker"
+    # The permissionClaims mirror root:providers:system — the operator needs to
+    # create the namespace/SA/secret/RBAC in the provisioned provider workspace.
+    cat <<'EOF' | KUBECONFIG="$ws_rb" kubectl apply -f - || die "Failed to bind providers API"
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIBinding
+metadata:
+  name: providers.platform-mesh.io
+spec:
+  reference:
+    export:
+      path: root:platform-mesh-system
+      name: providers.platform-mesh.io
+  permissionClaims:
+    - {group: "", resource: namespaces, selector: {matchAll: true}, state: Accepted, verbs: [get, list, watch, create, update, patch, delete]}
+    - {group: "", resource: serviceaccounts, selector: {matchAll: true}, state: Accepted, verbs: [get, list, watch, create, update, patch, delete]}
+    - {group: "", resource: secrets, selector: {matchAll: true}, state: Accepted, verbs: [get, list, watch, create, update, patch, delete]}
+    - {group: rbac.authorization.k8s.io, resource: roles, selector: {matchAll: true}, state: Accepted, verbs: [get, list, watch, create, update, patch, delete]}
+    - {group: rbac.authorization.k8s.io, resource: rolebindings, selector: {matchAll: true}, state: Accepted, verbs: [get, list, watch, create, update, patch, delete]}
+EOF
+    KUBECONFIG="$ws_rb" kubectl wait --for=condition=Ready \
+        apibinding/providers.platform-mesh.io --timeout="$timeout" \
+        || die "providers API binding not ready"
+
+    log "Creating the resource-broker Provider"
+    cat <<'EOF' | KUBECONFIG="$ws_rb" kubectl apply -f - || die "Failed to create Provider"
+apiVersion: providers.platform-mesh.io/v1alpha1
+kind: Provider
+metadata:
+  name: resource-broker
+spec: {}
+EOF
+    KUBECONFIG="$ws_rb" kubectl wait --for=jsonpath='{.status.phase}=Ready' \
+        provider/resource-broker --timeout="$timeout" \
+        || die "Provider resource-broker did not become Ready"
+
+    log "Extracting the provisioned provider kubeconfig"
+    # In-cluster form (broker pod mounts this verbatim — it targets the provider
+    # workspace via the in-cluster front-proxy).
+    KUBECONFIG="$ws_rb" kubectl get secret resource-broker-provider-kubeconfig \
+        -o jsonpath='{.data.kubeconfig}' | base64 -d > "$kubeconfigs/provider-incluster.kubeconfig" \
+        || die "Failed to read provisioned provider kubeconfig"
+    # Host-reachable form for bootstrapping resources from this script.
+    cp "$kubeconfigs/provider-incluster.kubeconfig" "$ws_provider"
+    yq -i ".clusters[].cluster.server |= sub(\"${PM_KCP_INCLUSTER}\"; \"kcp.api.portal.localhost:8443\")" \
+        "$ws_provider" || die "Failed to rewrite provider kubeconfig host"
+}
+
+_platform_apis() {
+    log "Installing coordination CRDs into the provider workspace"
+    kubectl::apply "$ws_provider" \
+        ./config/coordbroker/crd/coord.broker.platform-mesh.io_assignments.yaml \
+        ./config/coordbroker/crd/coord.broker.platform-mesh.io_migrationconfigurations.yaml \
+        ./config/coordbroker/crd/coord.broker.platform-mesh.io_migrations.yaml \
+        ./config/coordbroker/crd/coord.broker.platform-mesh.io_stagingworkspaces.yaml
+
+    log "Creating AcceptAPI APIExport for providers"
+    # Becomes the `acceptapis` APIExportEndpointSlice the broker watches via
+    # -acceptapi=acceptapis; every other slice in the workspace is brokered.
+    kcp::apiexport "$ws_provider" ./config/broker/crd/broker.platform-mesh.io_acceptapis.yaml \
+        secrets get,list,watch
+
+    log "Creating ObjectStorage APIExport for consumers"
+    kcp::apiexport "$ws_provider" ./config/generic/crd/storage.example.io_objectstorages.yaml \
+        secrets '*' \
+        events '*' \
+        namespaces '*'
+    # The marketplace + portal join APIExport <-> ProviderMetadata/ContentConfiguration
+    # on this label; value = APIExport name (also the ProviderMetadata name).
+    kubectl --kubeconfig "$ws_provider" label apiexport objectstorages \
+        ui.platform-mesh.io/content-for=objectstorages --overwrite \
+        || die "Failed to label objectstorages APIExport"
+    # Allow account users to bind the objectstorages APIExport (the marketplace
+    # Enable action). Without this the bind is denied and Enable does nothing.
+    kubectl --kubeconfig "$ws_provider" apply -f ./platform/manifests/apiexport-bind-rbac.yaml \
+        || die "Failed to apply APIExport bind RBAC"
+
+    log "Registering the provider in the Platform Mesh marketplace"
+    # ProviderMetadata surfaces the provider tile; ContentConfiguration adds the
+    # account-scoped nav + generic list/detail/create views for the Object API.
+    # Both join the APIExport via the content-for label (== ProviderMetadata name).
+    kubectl --kubeconfig "$ws_provider" apply -f ./platform/manifests/provider-metadata.yaml \
+        || die "Failed to apply ProviderMetadata"
+    kubectl --kubeconfig "$ws_provider" apply -f ./platform/manifests/content-configuration.yaml \
+        || die "Failed to apply ContentConfiguration"
+}
+
+_broker() {
+    log "Deploying resource-broker (targets its provisioned provider workspace)"
+    kubectl::kustomize "$kind_platform" ./platform/manifests
+
+    # The provisioned kubeconfig already targets the provider workspace via the
+    # in-cluster front-proxy — mount it directly.
+    kubectl create secret generic kcp-kubeconfig --namespace=resource-broker-system --dry-run=client -o yaml \
+        --from-file=kubeconfig="$kubeconfigs/provider-incluster.kubeconfig" \
+        | kubectl::apply "$kind_platform" "-"
+
+    kubectl::wait "$kind_platform" deployment/resource-broker resource-broker-system condition=Available
+}
+
+_consumer() {
+    log "Binding the generic Object API and placing an order in the consumer workspace"
+    kubectl::apply "$ws_consumer" \
+        ./consumer/apibinding-objects.yaml
+    kubectl::wait "$ws_consumer" apibinding/objectstorages "" condition=Ready
+    kubectl::apply "$ws_consumer" \
+        ./consumer/order-object.yaml
+}
+
+_setup() {
+    _kubeconfig
+    _kcp
+    _provider_workspace
+    _platform_apis
+    _broker
+    # Providers (gcp/aws) + consumer order skipped for now — this brings up the
+    # broker and registers the generic Object API in the marketplace.
+    log "Setup complete. The resource-broker provider and its Object API are"
+    log "registered. Check the marketplace, or:"
+    log "  kubectl --kubeconfig $ws_provider get apiexports,contentconfigurations,providermetadatas"
+}
+
+case "${1:-setup}" in
+    (setup) _setup ;;
+    (kubeconfig) _kubeconfig; _kcp ;;
+    (broker) _kubeconfig; _kcp; _broker ;;
+    (*) die "Unknown command: $1 (want: setup | kubeconfig | broker)" ;;
+esac
