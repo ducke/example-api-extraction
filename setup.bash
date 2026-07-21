@@ -195,6 +195,7 @@ _krop() {
         -o jsonpath='{.data.kubeconfig}' \
         | base64 -d \
         | sed -e "s#root.kcp.localhost#frontproxy-front-proxy.platform-mesh-system.svc.cluster.local#g" \
+        | sed -e "s#/clusters/root#/clusters/root:$provider#g" \
         > "$krop_kubeconfig"
 
     kubectl create namespace "$kind_namespace" \
