@@ -201,7 +201,7 @@ _floci() {
     local name="$1"
     shift
 
-    if docker ps --all --quiet | grep -q "^${name}$"; then
+    if docker ps --all --format '{{.Names}}' | grep -q "^${name}$"; then
         # exists, do nothing
         return
     fi
