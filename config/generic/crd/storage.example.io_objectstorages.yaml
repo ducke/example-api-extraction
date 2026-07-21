@@ -1,36 +1,33 @@
-# Copyright The Platform Mesh Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
-  name: objects.storage.generic.platform-mesh.io
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: objectstorages.storage.example.io
 spec:
-  group: storage.generic.platform-mesh.io
+  group: storage.example.io
   names:
-    kind: Object
-    listKind: ObjectList
-    plural: objects
-    singular: object
+    kind: ObjectStorage
+    listKind: ObjectStorageList
+    plural: objectstorages
+    singular: objectstorage
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.region
+      name: Region
+      type: string
+    - jsonPath: .status.status
+      name: Status
+      type: string
+    - jsonPath: .status.url
+      name: URL
+      type: string
+    name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: Object is the Schema for the objects API.
+        description: ObjectStorage is the Schema for the ObjectStorage.
         properties:
           apiVersion:
             description: |-
@@ -50,22 +47,23 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of Object
+            description: ObjectStorageSpec defines the desired state of ObjectStorage.
             properties:
               region:
-                description: region is the geographic region where the object storage
-                  should be created.
+                description: |-
+                  Region is the geographic region where the object storage should be created.
+                  The resource-broker routes the order to a provider that accepts this region.
                 type: string
               versioning:
-                description: versioning enables object versioning.
+                description: Versioning enables object versioning.
                 type: boolean
             type: object
           status:
-            description: status defines the observed state of Object
+            description: ObjectStorageStatus defines the observed state of ObjectStorage.
             properties:
               conditions:
-                description: conditions represent the current state of the Object
-                  resource.
+                description: Conditions represent the latest available observations
+                  of the ObjectStorage's state.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -121,20 +119,11 @@ spec:
                   - type
                   type: object
                 type: array
-                x-kubernetes-list-map-keys:
-                - type
-                x-kubernetes-list-type: map
               relatedResources:
                 additionalProperties:
-                  description: |-
-                    RelatedResource defines references to related resources.
-                    It should be embedded in the status of resources that should be
-                    synchronized by the generic reconciler.
                   properties:
                     gvk:
-                      description: |-
-                        GroupVersionKind unambiguously identifies a kind.  It doesn't anonymously include GroupVersion
-                        to avoid automatic coercion.  It doesn't use a GroupVersion to avoid custom marshalling
+                      description: GroupVersionKind unambiguously identifies a kind.
                       properties:
                         group:
                           type: string
@@ -155,11 +144,19 @@ spec:
                   - gvk
                   - name
                   type: object
-                description: RelatedResources lists resources related to this Object.
+                description: |-
+                  RelatedResources lists resources related to this ObjectStorage, keyed by identifier.
+                  The resource-broker copies these (e.g. a result Secret) back to the consumer.
                 type: object
+              status:
+                description: Status is a human-readable provisioning state (e.g. Provisioning,
+                  Available), set by the realizing provider.
+                type: string
+              url:
+                description: URL is the address of the provisioned object storage
+                  (e.g. gs://bucket or s3://bucket), set by the realizing provider.
+                type: string
             type: object
-        required:
-        - spec
         type: object
     served: true
     storage: true
