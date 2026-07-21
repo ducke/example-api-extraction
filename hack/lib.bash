@@ -579,21 +579,12 @@ kcp::create_workspace() {
     [[ -z "$wsname" ]] && die "wsname is required"
 
     local current_server="$(kubeconfig::hostname "$parent_kubeconfig")"
-    local local_server="127.0.0.1:8443"
 
     cp "$parent_kubeconfig" "$target_kubeconfig" \
         || die "Failed to copy kubeconfig from $parent_kubeconfig to $target_kubeconfig"
-    kubeconfig::hostname::set "$target_kubeconfig" "$current_server" "$local_server"
+    kubeconfig::hostname::set "$target_kubeconfig" "$current_server" "$current_server"
     local check_kubeconfig="$target_kubeconfig.check"
     cp "$target_kubeconfig" "$check_kubeconfig"
-
-    # Wait until the parent workspace serves the tenancy API. WorkspaceTypes
-    # only exist in root, so they cannot be used as a readiness gate for
-    # nested workspaces.
-    while ! KUBECONFIG="$target_kubeconfig" kubectl get workspaces &>/dev/null; do
-        log "Workspace API not ready yet, retrying..."
-        sleep 2
-    done
 
     log "Creating workspace $wsname"
     local attempt created=""
