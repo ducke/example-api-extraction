@@ -46,7 +46,7 @@ top (the broker) and a **second** provider; realization here goes through **kro*
 
 ```
 manifests/floci-gcp.yaml          Emulator GCS  (:4588)
-manifests/floci-aws.yaml          Emulator S3   (:4566)   [VERIFY image/port]
+manifests/floci-aws.yaml          Emulator S3   (:4566)   floci/floci:latest (verified)
 platform/README.md                the two platform APIExports (main hand-wiring)
 providers/gcp/acceptapi.yaml      region=eu  ──┐
 providers/gcp/rgd-object.yaml     kro → floci-gcp
@@ -193,5 +193,5 @@ kind delete cluster --name broker-poc
 ## Known limits / risks
 
 See `tasks/todo.md`. In short: create-only Jobs (no bucket delete on cutover;
-floci is ephemeral), floci-aws image/port/env still to be verified, and the
-generic `objects` APIExport is the only notable piece of hand-wiring.
+floci is ephemeral) and the generic `objects` APIExport is the only notable piece
+of hand-wiring. (floci-aws is verified: image `floci/floci:latest`, port 4566.)
