@@ -4,10 +4,9 @@
 #
 # The export lives in the PROVISIONED resource-broker provider workspace
 # (root:providers:resource-broker-*, created by the providers-operator from the
-# Provider CR in setup.bash). The suffix is dynamic — look it up and adjust
-# spec.reference.export.path before applying, e.g.:
-#   KUBECONFIG=kubeconfigs/workspaces/resource-broker.kubeconfig \
-#     kubectl get provider resource-broker -o yaml   # status carries the workspace
+# Provider CR in setup.bash). The suffix is dynamic — setup.bash substitutes the
+# real path automatically; when applying manually, adjust
+# spec.reference.export.path first.
 #
 # The permissionClaims are what the broker needs to copy related resources (the
 # result secret, events, the namespace) into the consumer workspace — the claims

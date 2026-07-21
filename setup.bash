@@ -21,7 +21,38 @@ kcp_admin="$kubeconfigs/kcp-admin.kubeconfig"
 ws="$kubeconfigs/workspaces"
 ws_rb="$ws/resource-broker.kubeconfig"          # root:resource-broker (holds the Provider CR)
 ws_provider="$ws/provider.kubeconfig"           # provisioned root:providers:resource-broker-* (host-reachable)
+ws_gcp="$ws/gcp.kubeconfig"                     # root:gcp (the GCP provider workspace)
 ws_consumer="$ws/consumer.kubeconfig"
+
+# The traefik ClusterIP the local-setup pins; every platform component maps the
+# kcp external hostnames onto it via hostAliases (they resolve to 127.0.0.1
+# inside pods otherwise).
+PM_TRAEFIK_IP="${PM_TRAEFIK_IP:-10.96.188.4}"
+
+# provider::path prints the provisioned provider workspace path
+# (root:providers:resource-broker-<suffix>). The provisioned kubeconfig's
+# server URL carries the logical-cluster ID, not the path — list the
+# workspaces under root:providers as admin instead.
+provider::path() {
+    local tmp="$kubeconfigs/.providers-admin.kubeconfig"
+    admin::ws_kubeconfig "$tmp" "root:providers"
+    local name
+    name="$(KUBECONFIG="$tmp" kubectl get workspaces -o name 2>/dev/null \
+        | grep 'resource-broker-' | head -1)"
+    name="${name##*/}"
+    [[ -n "$name" ]] || die "provisioned resource-broker workspace not found under root:providers"
+    echo "root:providers:$name"
+}
+
+# admin::ws_kubeconfig <target> <workspace-path> [server-host]
+# Writes an admin kubeconfig entered into <workspace-path>. Defaults to the
+# host-reachable external URL; pass a server host for the in-cluster variant.
+admin::ws_kubeconfig() {
+    local target="$1" wspath="$2" host="${3:-kcp.api.portal.localhost:8443}"
+    cp "$kcp_admin" "$target"
+    yq -i ".clusters[].cluster.server = \"https://$host/clusters/$wspath\"" "$target" \
+        || die "Failed to rewrite $target for $wspath"
+}
 
 _kubeconfig() {
     if ! kind get clusters | grep -q "^$KIND_CLUSTER$"; then
@@ -107,6 +138,27 @@ EOF
     cp "$kubeconfigs/provider-incluster.kubeconfig" "$ws_provider"
     yq -i ".clusters[].cluster.server |= sub(\"${PM_KCP_INCLUSTER}\"; \"kcp.api.portal.localhost:8443\")" \
         "$ws_provider" || die "Failed to rewrite provider kubeconfig host"
+
+    # The provisioned workspace only binds the platform-mesh APIs. The broker
+    # needs the tenancy API to create its verify-*/staging-* child workspaces —
+    # bind it as admin (the scoped provider SA may not bind root exports).
+    log "Binding the tenancy API into the provider workspace"
+    local provider_admin="$kubeconfigs/provider-admin.kubeconfig"
+    admin::ws_kubeconfig "$provider_admin" "$(provider::path)"
+    cat <<'EOF' | KUBECONFIG="$provider_admin" kubectl apply -f - || die "Failed to bind tenancy API"
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIBinding
+metadata:
+  name: tenancy.kcp.io
+spec:
+  reference:
+    export:
+      path: root
+      name: tenancy.kcp.io
+EOF
+    KUBECONFIG="$provider_admin" kubectl wait --for=condition=Ready=True \
+        apibinding/tenancy.kcp.io --timeout="$timeout" \
+        || die "tenancy API binding not ready"
 }
 
 _platform_apis() {
@@ -152,22 +204,152 @@ _broker() {
     log "Deploying resource-broker (targets its provisioned provider workspace)"
     kubectl::kustomize "$kind_platform" ./platform/manifests
 
-    # The provisioned kubeconfig already targets the provider workspace via the
-    # in-cluster front-proxy — mount it directly.
+    local wspath
+    wspath="$(provider::path)"
+
+    # NOT the provisioned provider kubeconfig: that SA is scoped to its own
+    # logical cluster (authentication.kcp.io/scopes), so kcp's apibinder
+    # initializer — which acts as the workspace creator — cannot initialize the
+    # broker's verify-*/staging-* child workspaces, and the broker cannot enter
+    # them. Mount an admin kubeconfig targeting the provider workspace via the
+    # in-cluster front-proxy instead (same approach as the standalone
+    # broker-postgres example, which uses the kcp-operator admin kubeconfig).
+    local broker_kubeconfig="$kubeconfigs/broker-incluster.kubeconfig"
+    admin::ws_kubeconfig "$broker_kubeconfig" "$wspath" "$PM_KCP_INCLUSTER"
     kubectl create secret generic kcp-kubeconfig --namespace=resource-broker-system --dry-run=client -o yaml \
-        --from-file=kubeconfig="$kubeconfigs/provider-incluster.kubeconfig" \
+        --from-file=kubeconfig="$broker_kubeconfig" \
         | kubectl::apply "$kind_platform" "-"
+
+    # The broker's workspace-tree defaults (root:platform:broker:*) come from
+    # the standalone example; point them at the provisioned workspace. Replacing
+    # the full args array keeps this idempotent across reruns.
+    kubectl --kubeconfig "$kind_platform" -n resource-broker-system patch deployment resource-broker \
+        --type json -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args\",\"value\":[
+            \"-kubeconfig=/kubeconfig/kubeconfig\",
+            \"-kcp-kubeconfig=/kubeconfig/kubeconfig\",
+            \"-compute-kubeconfig=/compute-kubeconfig/kubeconfig\",
+            \"-acceptapi=acceptapis\",
+            \"-requeue-interval=1s\",
+            \"-coordination-workspace=$wspath\",
+            \"-verification-tree-root=$wspath\",
+            \"-staging-tree-root=$wspath\"]}]" \
+        || die "Failed to patch broker workspace-tree flags"
 
     kubectl::wait "$kind_platform" deployment/resource-broker resource-broker-system condition=Available
 }
 
+# _gcp_provider wires the GCP provider: kcp workspace + APIExport, the
+# realization layer on the compute cluster (floci emulators + kro RGD), an
+# api-syncagent publishing the ObjectStorage API into the workspace, and the
+# AcceptAPI that registers it with the broker (region eu).
+# The AWS provider is intentionally NOT wired here — it is implemented
+# separately; see providers/gcp as the blueprint.
+_gcp_provider() {
+    log "Creating the gcp provider workspace and APIExport"
+    workspace::create "$kcp_admin" "$ws_gcp" "gcp"
+    # Empty APIExport — the api-syncagent manages its resource schemas.
+    cat <<'EOF' | KUBECONFIG="$ws_gcp" kubectl apply -f - || die "Failed to create objectstorages APIExport"
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIExport
+metadata:
+  name: objectstorages
+EOF
+
+    log "Binding the AcceptAPI export into the gcp workspace"
+    cat <<EOF | KUBECONFIG="$ws_gcp" kubectl apply -f - || die "Failed to bind acceptapis"
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIBinding
+metadata:
+  name: acceptapis
+spec:
+  reference:
+    export:
+      path: $(provider::path)
+      name: acceptapis
+  permissionClaims:
+    - {group: "", resource: secrets, selector: {matchAll: true}, state: Accepted, verbs: [get, list, watch]}
+EOF
+    KUBECONFIG="$ws_gcp" kubectl wait --for=condition=Ready=True apibinding/acceptapis --timeout="$timeout" \
+        || die "acceptapis binding not ready"
+
+    log "Deploying the realization layer (floci emulators + kro RGD)"
+    kubectl --kubeconfig "$kind_platform" get ns kro-system >/dev/null 2>&1 \
+        || die "kro not found — the Platform Mesh local-setup should provide it"
+    kubectl::kustomize "$kind_platform" ./kind/manifests
+    kubectl::apply "$kind_platform" ./providers/gcp/manifests/rgd-objectstorage.yaml
+    kubectl --kubeconfig "$kind_platform" create namespace gcp-orders --dry-run=client -o yaml \
+        | kubectl::apply "$kind_platform" "-"
+    kubectl::wait "$kind_platform" rgd/objectstorages.storage.example.io "" jsonpath='{.status.state}'=Active
+
+    log "Installing the api-syncagent for the gcp workspace"
+    local token agent_kubeconfig="$kubeconfigs/api-syncagent-gcp.kubeconfig"
+    token="$(kcp::serviceaccount::admin "$ws_gcp" api-syncagent default | tail -1)"
+    [[ -n "$token" ]] || die "Failed to create api-syncagent token"
+    kubeconfig::create::token "$agent_kubeconfig" \
+        "https://${PM_KCP_INCLUSTER}/clusters/root:gcp" "$token" >/dev/null
+    kubectl create secret generic kubeconfig-gcp --namespace=default --dry-run=client -o yaml \
+        --from-file=kubeconfig="$agent_kubeconfig" \
+        | kubectl::apply "$kind_platform" "-"
+    helm::repo kcp https://kcp-dev.github.io/helm-charts
+    helm::install "$kind_platform" api-syncagent-gcp kcp/api-syncagent \
+        --version=0.4.5 \
+        --namespace default \
+        --set replicas=1 \
+        --set apiExportName=objectstorages \
+        --set agentName=gcp \
+        --set kcpKubeconfig=kubeconfig-gcp \
+        --set "hostAliases.values[0].ip=$PM_TRAEFIK_IP" \
+        --set "hostAliases.values[0].hostnames[0]=localhost" \
+        --set "hostAliases.values[0].hostnames[1]=root.kcp.localhost" \
+        --set "hostAliases.values[0].hostnames[2]=kcp.api.portal.localhost"
+    kubectl::apply "$kind_platform" ./providers/gcp/manifests/publishedresource-objectstorages.yaml
+    cat <<'EOF' | kubectl::apply "$kind_platform" "-"
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: api-syncagent-gcp:objectstorages
+rules:
+  - apiGroups: ["storage.example.io"]
+    resources: ["objectstorages", "objectstorages/status"]
+    verbs: [get, list, watch, create, update, delete, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: api-syncagent-gcp:objectstorages
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: api-syncagent-gcp:objectstorages
+subjects:
+  - kind: ServiceAccount
+    name: api-syncagent-gcp
+    namespace: default
+EOF
+
+    log "Registering the gcp provider with the broker (AcceptAPI, region eu)"
+    kubectl::apply "$ws_gcp" ./providers/gcp/manifests/acceptapi.yaml
+    KUBECONFIG="$ws_gcp" kubectl wait acceptapi/objectstorages.storage.example.io \
+        --for=condition=Ready --timeout="$timeout" \
+        || die "AcceptAPI did not become Ready — check the broker logs"
+}
+
 _consumer() {
-    log "Binding the generic Object API and placing an order in the consumer workspace"
-    kubectl::apply "$ws_consumer" \
-        ./consumer/apibinding-objectstorages.yaml
+    log "Creating the consumer workspace and binding the ObjectStorage API"
+    workspace::create "$kcp_admin" "$ws_consumer" "consumer"
+    # The binding manifest carries a placeholder export path — substitute the
+    # actual provisioned provider workspace path.
+    sed "s|path: root:providers:resource-broker .*|path: $(provider::path)|" \
+        ./consumer/apibinding-objectstorages.yaml \
+        | kubectl::apply "$ws_consumer" "-"
     kubectl::wait "$ws_consumer" apibinding/objectstorages "" condition=Ready
-    kubectl::apply "$ws_consumer" \
-        ./consumer/order-objectstorage.yaml
+
+    log "Placing an order (ObjectStorage, region eu)"
+    kubectl::apply "$ws_consumer" ./consumer/order-objectstorage.yaml
+    KUBECONFIG="$ws_consumer" kubectl wait objectstorage/bucket-from-consumer \
+        --for=jsonpath='{.status.status}'=Available --timeout="$timeout" \
+        || die "Order did not become Available — check broker/syncagent logs"
+    log "Order fulfilled: $(KUBECONFIG="$ws_consumer" kubectl get objectstorage bucket-from-consumer -o jsonpath='{.status.url}')"
 }
 
 _setup() {
@@ -176,10 +358,13 @@ _setup() {
     _provider_workspace
     _platform_apis
     _broker
-    # Providers (gcp/aws) + consumer order skipped for now — this brings up the
-    # broker and registers the generic Object API in the marketplace.
-    log "Setup complete. The resource-broker provider and its Object API are"
-    log "registered. Check the marketplace, or:"
+    _gcp_provider
+    _consumer
+    # The AWS provider is implemented separately (see providers/gcp as the
+    # blueprint); once its AcceptAPI (region us) is Ready, patching the order's
+    # region from eu to us triggers the broker migration.
+    log "Setup complete: order routed through the broker to the gcp provider."
+    log "Marketplace view:"
     log "  kubectl --kubeconfig $ws_provider get apiexports,contentconfigurations,providermetadatas"
 }
 
@@ -187,5 +372,7 @@ case "${1:-setup}" in
     (setup) _setup ;;
     (kubeconfig) _kubeconfig; _kcp ;;
     (broker) _kubeconfig; _kcp; _broker ;;
-    (*) die "Unknown command: $1 (want: setup | kubeconfig | broker)" ;;
+    (gcp) _kubeconfig; _kcp; _gcp_provider ;;
+    (consumer) _kubeconfig; _kcp; _consumer ;;
+    (*) die "Unknown command: $1 (want: setup | kubeconfig | broker | gcp | consumer)" ;;
 esac

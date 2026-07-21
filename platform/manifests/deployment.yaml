@@ -13,6 +13,19 @@ spec:
         app: resource-broker
     spec:
       serviceAccountName: resource-broker
+      # kcp advertises virtual-workspace URLs under its external hostnames
+      # (root.kcp.localhost etc.), which resolve to 127.0.0.1 inside pods.
+      # Route them to the local-setup's traefik (pinned ClusterIP), same as
+      # every other platform component does. Without this the broker cannot
+      # watch the AcceptAPI/objectstorages virtual workspaces.
+      hostAliases:
+        - ip: 10.96.188.4
+          hostnames:
+            - localhost
+            - portal.localhost
+            - kcp.localhost
+            - root.kcp.localhost
+            - kcp.api.portal.localhost
       containers:
         - name: resource-broker
           image: broker
