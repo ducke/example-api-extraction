@@ -1,0 +1,17 @@
+# PublishedResource fuer den AWS-Provider — identisch zur GCP-Seite, nur der
+# Ziel-Namespace auf dem Compute-Cluster ist aws-orders. Publiziert die
+# Object-CRD als APIExport "objects" in root:providers:aws.
+apiVersion: syncagent.kcp.io/v1alpha1
+kind: PublishedResource
+metadata:
+  name: aws-objects
+spec:
+  enableWorkspacePaths: true
+  resource:
+    apiGroup: storage.generic.platform-mesh.io
+    kind: Object
+    versions:
+      - v1alpha1
+  naming:
+    namespace: aws-orders
+    name: '{{ .ClusterName }}-{{ .Object.metadata.namespace }}-{{ .Object.metadata.name }}'

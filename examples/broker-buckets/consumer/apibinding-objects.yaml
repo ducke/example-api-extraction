@@ -1,0 +1,35 @@
+# Consumer bindet die generische storage.Object-API aus dem Platform-Workspace.
+# Diese API ist vom resource-broker "backed": Instanzen erscheinen im Virtual
+# Workspace des Exports, der Broker sieht und routet sie.
+#
+# Die permissionClaims sind das, was der Broker braucht, um verwandte Ressourcen
+# (das Ergebnis-Secret, Events, den Namespace) in den Consumer-Workspace zu
+# kopieren — Lektion aus dem GCP-Spike: die Claims muessen Accepted sein.
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIBinding
+metadata:
+  name: objects
+spec:
+  reference:
+    export:
+      path: root:platform
+      name: objects
+  permissionClaims:
+    - resource: secrets
+      group: ""
+      state: Accepted
+      selector:
+        matchAll: true
+      verbs: ["*"]
+    - resource: events
+      group: ""
+      state: Accepted
+      selector:
+        matchAll: true
+      verbs: ["*"]
+    - resource: namespaces
+      group: ""
+      state: Accepted
+      selector:
+        matchAll: true
+      verbs: ["*"]

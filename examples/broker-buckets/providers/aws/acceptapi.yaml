@@ -1,0 +1,16 @@
+# AcceptAPI: der AWS-Provider bedient storage.Object-Bestellungen mit region=us.
+# Gleiche Struktur wie beim GCP-Provider, nur anderer Filter -> darueber routet
+# der Broker eu->GCP / us->AWS und migriert bei Region-Wechsel.
+apiVersion: broker.platform-mesh.io/v1alpha1
+kind: AcceptAPI
+metadata:
+  name: objects.storage.generic.platform-mesh.io
+spec:
+  apiExportName: objects
+  filters:
+    - key: region
+      valueIn: [us]
+  gvr:
+    group: storage.generic.platform-mesh.io
+    resource: objects
+    version: v1alpha1

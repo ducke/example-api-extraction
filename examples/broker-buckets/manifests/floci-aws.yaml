@@ -1,0 +1,64 @@
+# floci-aws Emulator (S3, LocalStack-kompatibel: Port 4566, Fake-Creds).
+# Analog zu floci-gcp aufgebaut.
+# VERIFY (vor Ort): Image-Tag (floci/floci-aws:latest?), Port (4566?) und
+# Env-Praefix (FLOCI_AWS_*?) gegen die floci-aws-Doku pruefen — floci.io/aws.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: floci-aws
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: floci-aws
+  namespace: floci-aws
+  labels:
+    app.kubernetes.io/name: floci-aws
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: floci-aws
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: floci-aws
+    spec:
+      # Gleiche Falle wie floci-gcp: Service-Links (FLOCI_AWS_PORT=tcp://...)
+      # kollidieren mit dem FLOCI_AWS_*-Env-Praefix -> aus.
+      enableServiceLinks: false
+      containers:
+        - name: floci-aws
+          image: floci/floci-aws:latest
+          ports:
+            - containerPort: 4566
+              name: api
+          env:
+            - name: FLOCI_AWS_HOSTNAME
+              value: floci-aws.floci-aws.svc.cluster.local
+          readinessProbe:
+            # tcpSocket statt httpGet: floci-aws-Health-Pfad noch nicht
+            # verifiziert; TCP-Ready ist robust genug fuer den PoC.
+            tcpSocket:
+              port: 4566
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: floci-aws
+  namespace: floci-aws
+spec:
+  selector:
+    app.kubernetes.io/name: floci-aws
+  ports:
+    - name: api
+      port: 4566
+      targetPort: 4566

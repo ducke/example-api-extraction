@@ -1,0 +1,71 @@
+# kro ResourceGraphDefinition: GCP-Realisierung eines generischen storage.Object.
+# kro erzeugt aus diesem schema-Block selbst die CRD
+# objects.storage.generic.platform-mesh.io auf dem Compute-Cluster; der
+# api-syncagent publiziert sie in den Provider-Workspace (APIExport "objects").
+#
+# Realisierung: ein Job legt den Bucket per curl in floci-gcp an
+# (POST /storage/v1/b). Bewusst KEIN Crossplane — kro relayed direkt auf ein
+# Kubernetes-Workload, analog zum kropg-Provider im Postgres-Beispiel.
+#
+# GRENZE (PoC): Der Job legt nur an (create-only). Beim Loeschen/Cutover raeumt
+# kro den Job ab, nicht den Bucket. floci ist ephemer (kind delete wischt alles) —
+# fuer produktiv braeuchte es einen Delete-Job/Finalizer. Siehe tasks/todo.md.
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: objects.storage.generic.platform-mesh.io
+spec:
+
+  schema:
+    group: storage.generic.platform-mesh.io
+    apiVersion: v1alpha1
+    kind: Object
+    spec:
+      region: string
+      versioning: boolean
+    status:
+      # Status-Ausdruecke duerfen schema nicht referenzieren -> Bucket-Name wird
+      # als Job-Annotation gestempelt und von dort gelesen (Muster aus kropg).
+      url: gs://${createBucket.metadata.annotations["spike.odc/bucket-name"]}
+      status: ${createBucket.status.succeeded > 0 ? "Available" : "Provisioning"}
+      conditions: ${createBucket.status.conditions}
+
+  resources:
+
+    - id: createBucket
+      # kro requeued, bis der Job durch ist -> Instanz-Status wird Available.
+      readyWhen:
+        - ${createBucket.status.succeeded > 0}
+      template:
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: ${schema.metadata.name}-create
+          namespace: ${schema.metadata.namespace}
+          annotations:
+            # Bucket-Name = urspruenglicher Bestellname (syncagent mangelt den
+            # Objektnamen beim Sync; das Original steht in der Annotation).
+            # .orValue haelt es robust, falls die Annotation mal fehlt.
+            spike.odc/bucket-name: ${schema.metadata.?annotations["syncagent.kcp.io/remote-object-name"].orValue(schema.metadata.name)}
+        spec:
+          backoffLimit: 6
+          template:
+            spec:
+              restartPolicy: Never
+              enableServiceLinks: false
+              containers:
+                - name: create-bucket
+                  image: curlimages/curl:8.11.1
+                  env:
+                    - name: BUCKET
+                      value: ${schema.metadata.?annotations["syncagent.kcp.io/remote-object-name"].orValue(schema.metadata.name)}
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      set -eu
+                      echo "creating gs://${BUCKET} in floci-gcp"
+                      curl -sf -X POST \
+                        'http://floci-gcp.floci-gcp.svc.cluster.local:4588/storage/v1/b?project=test-project' \
+                        -H 'Content-Type: application/json' \
+                        -d "{\"name\":\"${BUCKET}\",\"location\":\"EU\"}"
+                      echo "ok"

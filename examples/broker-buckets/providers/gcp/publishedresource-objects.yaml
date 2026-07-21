@@ -1,0 +1,27 @@
+# PublishedResource: der api-syncagent des GCP-Providers veroeffentlicht die
+# von kro erzeugte Object-CRD aus dem Compute-Cluster in den Provider-Workspace
+# (root:providers:gcp) als APIExport "objects". Genau diesen Export nennt die
+# AcceptAPI (apiExportName: objects), und der Broker bindet ihn in seinen
+# Staging-Workspaces.
+#
+# Bidirektionaler Sync: Spec runter (kcp->Compute), Status hoch (Compute->kcp,
+# auto wegen /status-Subresource der kro-CRD). Keine spec-Mutation noetig — im
+# Gegensatz zum Crossplane-Spike gibt es hier kein compositionRef-Defaulting.
+apiVersion: syncagent.kcp.io/v1alpha1
+kind: PublishedResource
+metadata:
+  name: gcp-objects
+spec:
+  enableWorkspacePaths: true
+  resource:
+    apiGroup: storage.generic.platform-mesh.io
+    kind: Object
+    versions:
+      - v1alpha1
+  naming:
+    # Der Broker kopiert die Bestellung in einen Staging-Workspace; der syncagent
+    # zieht sie von dort auf den Compute-Cluster. Namespace/Name werden gemangelt,
+    # der Originalname bleibt in der Annotation syncagent.kcp.io/remote-object-name
+    # erhalten (die RGD baut daraus den Bucket-Namen).
+    namespace: gcp-orders
+    name: '{{ .ClusterName }}-{{ .Object.metadata.namespace }}-{{ .Object.metadata.name }}'
