@@ -36,3 +36,13 @@ spec:
         - name: compute-kubeconfig
           configMap:
             name: compute-kubeconfig
+      hostAliases:
+        - ip: "10.96.188.4"
+          hostnames:
+            - "localhost"
+            - "portal.localhost"
+            - "kcp.localhost"
+            - "root.kcp.localhost"
+            - "kcp.api.portal.localhost"
+            - "nereus.kcp.localhost"
+            - "triton.kcp.localhost"
