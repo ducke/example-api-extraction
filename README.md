@@ -9,10 +9,14 @@ extraction" idea made concrete.
 ## Structure
 
 The example providers live in `providers/`, one cloud provider per directory.
-Resource installed into the provider workspace go into `providers/<provider>/manifests/`.
+Resources installed into the provider workspace go into `providers/<provider>/manifests/`.
 
 The broker and platform setup happens in `platform/`.
 The example resources deployed for the consumer are in `comsumer/`.
 
-Each provider documents its own setup.
+The generic API and coordination CRDs are vendored under `config/`.
+
+The consumer's binding and order are in `consumer/`.
+`kind/manifests/` holds the floci fake-cloud storage backends.
+
 The overarching play-by-play resource changes are documented in `DEMO.md`.
