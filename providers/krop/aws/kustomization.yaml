@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: aws
+resources:
+  - admin-rbac.yaml
+helmCharts:
+  - name: krop-controller
+    repo: oci://ghcr.io/opendefensecloud/charts
+    version: 0.1.0
+    releaseName: krop-aws
+    namespace: aws
+    valuesInline:
+      image:
+        tag: sha-a98e23a
+      kcp:
+        kubeconfigSecret:
+          name: krop-kubeconfig
+components:
+  - ../hostaliases

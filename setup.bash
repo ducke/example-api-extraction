@@ -206,12 +206,9 @@ _krop() {
         --dry-run=client -o yaml \
         | kubectl --kubeconfig "$kind_platform" apply -f-
 
-    helm::install "$kind_platform" "krop-$provider" \
-        oci://ghcr.io/opendefensecloud/charts/krop-controller \
-        --version=0.1.0 \
-        --namespace "$kind_namespace" \
-        --set image.tag=ghcr.io/opendefensecloud/krop-controller:sha-a98e23a \
-        --set kcp.kubeconfigSecret.name=krop-kubeconfig
+    kustomize build --enable-helm "./providers/krop/$provider" \
+        | kubectl --kubeconfig "$kind_platform" apply -f- \
+        || die "Failed to deploy krop-controller for $provider"
 
     kubectl --kubeconfig "$ws_admin" apply \
         -f ./providers/krop/kcp-provider-crd.yaml
