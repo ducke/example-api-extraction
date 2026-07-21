@@ -2,9 +2,12 @@
 
 ## Before the hackathon (cheap now, expensive on site)
 
-- [ ] **Verify floci-aws**: image tag, port (4566?), env prefix (`FLOCI_AWS_*`?)
-      and test an `s3api create-bucket` against `:4566` locally (Docker, no kind).
-      Source: https://floci.io/aws/ · https://github.com/floci-io/floci
+- [x] **Verify floci-aws** (done 2026-07-21, Docker, no kind): image is
+      `floci/floci:latest` (NOT floci/floci-aws), port 4566, no `FLOCI_AWS_*` env
+      needed. `aws s3api create-bucket --bucket X` -> `{"Location":"/X"}`,
+      list-buckets confirms; works without a Docker socket (S3 is native).
+      GET / returns 200. manifests/floci-aws.yaml updated accordingly.
+      Source: https://github.com/floci-io/floci
 - [ ] **kcp kubectl plugins** via krew, set PATH.
 - [ ] **resource-broker image**: `start-broker` builds from the repo (Go needed) —
       run the build ahead of time, cache the image locally. (The upstream TODO

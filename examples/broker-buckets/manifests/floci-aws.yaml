@@ -1,7 +1,7 @@
 # floci-aws emulator (S3, LocalStack-compatible: port 4566, fake creds).
-# Built analogously to floci-gcp.
-# VERIFY (on site): image tag (floci/floci-aws:latest?), port (4566?) and env
-# prefix (FLOCI_AWS_*?) against the floci-aws docs — floci.io/aws.
+# Verified locally 2026-07-21: image floci/floci:latest, port 4566, no special
+# env needed (standard AWS creds only). `aws s3api create-bucket` and list-buckets
+# work without a Docker socket — S3 is native. GET / returns 200 (ListAllMyBuckets).
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -24,22 +24,19 @@ spec:
       labels:
         app.kubernetes.io/name: floci-aws
     spec:
-      # Same trap as floci-gcp: service links (FLOCI_AWS_PORT=tcp://...) collide
-      # with the FLOCI_AWS_* env prefix -> off.
+      # Keep service links off for parity with floci-gcp (Quarkus env-prefix trap);
+      # floci-aws needs no FLOCI_AWS_* env, so nothing collides here in practice.
       enableServiceLinks: false
       containers:
         - name: floci-aws
-          image: floci/floci-aws:latest
+          image: floci/floci:latest
           ports:
             - containerPort: 4566
               name: api
-          env:
-            - name: FLOCI_AWS_HOSTNAME
-              value: floci-aws.floci-aws.svc.cluster.local
           readinessProbe:
-            # tcpSocket instead of httpGet: the floci-aws health path isn't
-            # verified yet; TCP-ready is robust enough for the PoC.
-            tcpSocket:
+            # GET / returns 200 (ListAllMyBuckets) — verified.
+            httpGet:
+              path: /
               port: 4566
             initialDelaySeconds: 5
             periodSeconds: 5
