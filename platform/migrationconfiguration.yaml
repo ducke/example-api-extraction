@@ -36,8 +36,3 @@ spec:
                         value: ${from.status.url}
                       - name: DESTINATION_URI
                         value: ${to.status.url}
-                      # Bucket = host part of status.url (s3://bucket -> bucket).
-                      - name: ORIGIN_PATH
-                        value: ${from.status.url.substring(from.status.url.indexOf('://') + 3)}
-                      - name: DESTINATION_PATH
-                        value: ${to.status.url.substring(to.status.url.indexOf('://') + 3)}

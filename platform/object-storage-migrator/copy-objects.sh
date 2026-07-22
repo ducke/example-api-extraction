@@ -35,4 +35,4 @@ setenv() {
 setenv origin "$ORIGIN_URI"
 setenv dest "$DESTINATION_URI"
 
-exec rclone copy "origin:${ORIGIN_PATH}" "dest:${DESTINATION_PATH}" --progress
+exec rclone copy "origin:${ORIGIN_URI#*://}" "dest:${DESTINATION_URI#*://}" --progress
