@@ -529,6 +529,21 @@ _host_gcp_prod() {
             --for=condition=Healthy --timeout="$timeout" \
             || die "$pkg did not become Healthy"
     done
+    # Optional real GCP credentials: if a service-account key is present at the
+    # gitignored path, create the secret the ClusterProviderConfig reads
+    # (source: Secret, crossplane-system/gcp-credentials/credentials - see
+    # clusterproviderconfig.yaml.example). Absent -> the committed
+    # clusterproviderconfig.yaml runs against the floci-gcp emulator (fake token).
+    local gcp_creds=./providers/gcp-prod/host/gcp-credentials.json
+    if [[ -f "$gcp_creds" ]]; then
+        log "Found $gcp_creds - creating gcp-credentials secret (real GCP)"
+        kubectl --kubeconfig "$kind_platform" -n crossplane-system \
+            create secret generic gcp-credentials \
+            --from-file=credentials="$gcp_creds" \
+            --dry-run=client -o yaml \
+            | kubectl --kubeconfig "$kind_platform" apply -f- \
+            || die "failed to create gcp-credentials secret"
+    fi
     # The ClusterProviderConfig CRD is registered by the provider package -
     # kubectl::apply retries bridge the gap.
     kubectl::apply "$kind_platform" \
