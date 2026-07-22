@@ -12,7 +12,7 @@ helmCharts:
     valuesInline:
       image:
         repository: ghcr.io/ntnn/krop-controller
-        tag: hackathon-1
+        tag: hackathon-2
       kcp:
         kubeconfigSecret:
           name: krop-kubeconfig
