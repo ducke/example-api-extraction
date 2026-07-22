@@ -50,6 +50,7 @@ spec:
     provider "google" {
       project = "REPLACE_WITH_YOUR_GCP_PROJECT"
       region  = "europe-west4"
+      credentials = file("gcp-credentials.json")
       # credentials are injected from the secret above; no access_token / no
       # *_custom_endpoint overrides -> the provider talks to real googleapis.com.
     }
