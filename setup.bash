@@ -571,6 +571,91 @@ _provider_gcp_prod() {
     krop::register gcp-prod "$ws_admin"
 }
 
+# azure-prod (region nl): the same krop pattern, but the blueprint's host-target
+# resources are Azure Service Operator (ASO) CRDs realized against REAL Azure via
+# Azure ARM. Unlike gcp-prod there is no emulator - ASO always drives ARM and
+# floci-az is data-plane only. See providers/azure-prod/host/README.md.
+# Not part of the default `setup` chain (installs cert-manager + ASO); opt in via
+# `setup.bash azure-prod`. Requires a real Azure service principal supplied in
+# providers/azure-prod/host/aso-controller-settings.secret.yaml (gitignored).
+#
+# The four ASO storage CRDs the blueprint targets - kro type-checks blueprint
+# children against the workspace API surface (same reason gcp-prod applies the
+# Bucket CRD there).
+# crdPattern: only the CRD groups the blueprint needs. This scopes both what the
+# ASO chart installs on the host AND what _provider_azure_prod copies into the
+# workspace (every installed *.azure.com CRD), so there is no separate CRD list to
+# keep in sync.
+ASO_CRD_PATTERN="${ASO_CRD_PATTERN:-resources.azure.com/*;storage.azure.com/*}"
+
+_host_azure_prod() {
+    # Credential convention (shared with gcp-prod): the real settings file is
+    # gitignored and REQUIRED - azure-prod provisions against real Azure, no fake
+    # fallback. Copy the .example and supply a service principal.
+    local aso_secret=./providers/azure-prod/host/aso-controller-settings.secret.yaml
+    [[ -f "$aso_secret" ]] \
+        || die "missing $aso_secret - copy aso-controller-settings.secret.example.yaml and supply an Azure service principal (see providers/azure-prod/host/README.md)"
+
+    log "Ensuring cert-manager is present (ASO prerequisite)"
+    helm::install::certmanager "$kind_platform" \
+        -n cert-manager --wait --timeout "$timeout" \
+        || die "cert-manager install failed"
+
+    log "Installing Azure Service Operator (host)"
+    helm::repo aso2 https://raw.githubusercontent.com/Azure/azure-service-operator/main/v2/charts
+    # We manage the aso-controller-settings secret ourselves (from the gitignored
+    # file), so tell the chart NOT to create it (createAzureOperatorSecret=false) -
+    # otherwise Helm claims ownership of the secret and a plain kubectl apply
+    # collides. Apply the secret before the chart so the controller has creds on
+    # first start.
+    kubectl --kubeconfig "$kind_platform" create namespace azureserviceoperator-system \
+        --dry-run=client -o yaml \
+        | kubectl --kubeconfig "$kind_platform" apply -f-
+    kubectl::apply "$kind_platform" "$aso_secret"
+    helm --kubeconfig "$kind_platform" upgrade --install aso2 \
+        aso2/azure-service-operator \
+        -n azureserviceoperator-system --create-namespace \
+        --set createAzureOperatorSecret=false \
+        --set crdPattern="$ASO_CRD_PATTERN" \
+        --wait --timeout "$timeout" \
+        || die "Azure Service Operator install failed"
+    kubectl::wait "$kind_platform" \
+        deployment/azureserviceoperator-controller-manager \
+        azureserviceoperator-system condition=Available
+}
+
+_provider_azure_prod() {
+    local kind_namespace="azure-prod"
+    local ws_admin="$kubeconfigs/workspaces/azure-prod.admin.kubeconfig"
+    kcp::create_workspace "$kcp_admin" "$ws_admin" "azure-prod"
+    _krop azure-prod root:azure-prod "$ws_admin" "$kind_namespace"
+
+    # kro type-checks blueprint children against the workspace API surface - the
+    # ASO CRDs must exist in the workspace. They are installed on the host by
+    # _host_azure_prod (ASO chart, scoped by crdPattern); copy every installed
+    # *.azure.com CRD into the workspace:
+    #   - strip the conversion webhook (it points at the host ASO service, which
+    #     the kcp workspace cannot reach)
+    #   - server-side apply (no last-applied-config annotation, so the large
+    #     multi-version ASO CRDs stay under the 256KB annotation limit)
+    local crd crds
+    crds="$(kubectl --kubeconfig "$kind_platform" get crd -o name \
+        | grep -E '\.(resources|storage)\.azure\.com$')" \
+        || die "no ASO CRDs found on the host - did the ASO chart install?"
+    for crd in $crds; do
+        kubectl --kubeconfig "$kind_platform" get "$crd" -o yaml \
+            | yq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status)
+                  | .spec.conversion = {"strategy": "None"}' \
+            | KUBECONFIG="$ws_admin" kubectl apply --server-side --force-conflicts -f - \
+            || die "failed to install ASO CRD $crd into root:azure-prod"
+        KUBECONFIG="$ws_admin" kubectl wait --for=condition=Established \
+            "$crd" --timeout="$timeout" \
+            || die "ASO CRD $crd not established in root:azure-prod"
+    done
+
+    krop::register azure-prod "$ws_admin"
+}
+
 _object_storage_migrator() {
     local image="localhost/object-storage-migrator:latest"
     log "Building $image"
@@ -621,5 +706,6 @@ case "${1:-setup}" in
     (consumer) _kubeconfig; _kcp; _consumer ;;
     (krop-providers) _kubeconfig; _kcp; _provider_gcp; _provider_aws; _provider_azure ;;
     (gcp-prod) _kubeconfig; _kcp; _host_gcp_prod; _provider_gcp_prod ;;
-    (*) die "Unknown command: $1 (want: setup | kubeconfig | broker | gcp | aws | syncagent-gcp | consumer | krop-providers | gcp-prod)" ;;
+    (azure-prod) _kubeconfig; _kcp; _host_azure_prod; _provider_azure_prod ;;
+    (*) die "Unknown command: $1 (want: setup | kubeconfig | broker | gcp | aws | syncagent-gcp | consumer | krop-providers | gcp-prod | azure-prod)" ;;
 esac
