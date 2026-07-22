@@ -1,0 +1,99 @@
+# provider-gcp: ODC's production CloudAPI adapter, UNCHANGED (source + CI:
+# https://gitlab.opendefense.cloud/odc/cat/cloudapi/provider-gcp). Translates
+# storage.opendefense.cloud/Bucket -> gcp.opendefense.cloud/GCPBucket (Crossplane
+# claim) and mirrors status + a credentials secret back. Deployment/RBAC mirror
+# the production Flux component (flux-odc-gcp/apps/components/gcp-provider-controller).
+#
+# Image: public multi-arch build (amd64+arm64) on ghcr — runnable without ODC
+# access. With an ODC-internal source checkout (PROVIDER_GCP_SRC), setup.bash
+# builds locally, tags the same name and sideloads it into kind (IfNotPresent
+# then skips the pull). The Harbor CI image remains the production reference;
+# it is amd64-only and auth-gated, hence this mirror.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gcp-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: provider-gcp
+  namespace: gcp-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: provider-gcp:bucket-adapter
+rules:
+  - apiGroups: ["storage.opendefense.cloud"]
+    resources: ["buckets"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["storage.opendefense.cloud"]
+    resources: ["buckets/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["gcp.opendefense.cloud"]
+    resources: ["gcpbuckets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["gcp.opendefense.cloud"]
+    resources: ["gcpbuckets/status"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: provider-gcp:bucket-adapter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: provider-gcp:bucket-adapter
+subjects:
+  - kind: ServiceAccount
+    name: provider-gcp
+    namespace: gcp-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: provider-gcp
+  namespace: gcp-system
+  labels:
+    app.kubernetes.io/name: provider-gcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: provider-gcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: provider-gcp
+    spec:
+      serviceAccountName: provider-gcp
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: ghcr.io/ducke/provider-gcp:hackathon-1
+          imagePullPolicy: IfNotPresent
+          args:
+            - --zap-log-level=info
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

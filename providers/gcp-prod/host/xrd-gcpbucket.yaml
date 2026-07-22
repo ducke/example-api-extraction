@@ -1,0 +1,52 @@
+# Die bestellbare Ressource: namespaced GCPBucket mit FLACHEM Spec.
+# Flach ist Absicht — die generische Portal-UI (platform-mesh) kann keine
+# Arrays authoren (Lektion aus ARC, publishedresource-orders.yaml).
+apiVersion: apiextensions.crossplane.io/v2
+kind: CompositeResourceDefinition
+metadata:
+  name: gcpbuckets.gcp.opendefense.cloud
+spec:
+  scope: Namespaced
+  group: gcp.opendefense.cloud
+  names:
+    kind: GCPBucket
+    plural: gcpbuckets
+    singular: gcpbucket
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                bucketName:
+                  type: string
+                  description: >-
+                    Expliziter GCS-Bucket-Name. Gesetzt vom provider-gcp-Adapter
+                    (aus dem CloudAPI-Bucket, inkl. Eindeutigkeits-Suffix). Wenn
+                    leer, faellt die Composition auf <namespace>-<name> der
+                    Bestellung zurueck (direkter GCPBucket-Pfad, rueckwaertskompatibel).
+                location:
+                  type: string
+                  description: GCS-Location des Buckets
+                  default: "US"
+                storageClass:
+                  type: string
+                  description: >-
+                    GCS-Storage-Class in GCS-Schreibweise (STANDARD, NEARLINE,
+                    COLDLINE, ARCHIVE). Der provider-gcp-Adapter setzt sie aus
+                    dem CloudAPI-Bucket (dort kleingeschrieben) — GCPBucket ist
+                    ein interner Typ und erwartet die GCS-Uppercase-Form.
+                  default: "STANDARD"
+              # Bucket-Name = metadata.name der Bestellung — bewusst kein
+              # eigenes Feld, damit das Formular minimal bleibt.
+            status:
+              type: object
+              properties:
+                bucketUrl:
+                  type: string
+                  description: gs://-URL des provisionierten Buckets

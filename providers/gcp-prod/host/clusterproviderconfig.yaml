@@ -1,0 +1,43 @@
+# Pendant zu providerconfig.yaml für die NAMESPACED Workspace-Variante
+# (tf.m.upbound.io): namespaced MRs referenzieren eine ClusterProviderConfig.
+# Inhalt identisch zur cluster-scoped ProviderConfig — google-Provider mit
+# Custom Endpoints gegen den floci-gcp-Emulator, Fake-Token, k8s-Backend.
+apiVersion: tf.m.upbound.io/v1beta1
+kind: ClusterProviderConfig
+metadata:
+  name: floci-gcp
+spec:
+  credentials:
+    - filename: gcp-credentials.json
+      source: None
+  configuration: |
+    terraform {
+      backend "kubernetes" {
+        secret_suffix     = "cpc-floci-gcp"
+        namespace         = "crossplane-system"
+        in_cluster_config = true
+      }
+      required_providers {
+        google = {
+          source  = "hashicorp/google"
+          version = "~> 7.36"
+        }
+      }
+    }
+
+    provider "google" {
+      project      = "test-project"
+      region       = "us-central1"
+      access_token = "fake-token"
+
+      user_project_override = false
+
+      storage_custom_endpoint        = "http://floci-gcp.floci-gcp.svc.cluster.local:4588/storage/v1/"
+      iam_custom_endpoint            = "http://floci-gcp.floci-gcp.svc.cluster.local:4588/"
+      iam_beta_custom_endpoint       = "http://floci-gcp.floci-gcp.svc.cluster.local:4588/v1/"
+      secret_manager_custom_endpoint = "http://floci-gcp.floci-gcp.svc.cluster.local:4588/v1/"
+      cloud_run_custom_endpoint      = "http://floci-gcp.floci-gcp.svc.cluster.local:4588/v2/"
+      cloud_run_v2_custom_endpoint   = "http://floci-gcp.floci-gcp.svc.cluster.local:4588/v2/"
+      sql_custom_endpoint            = "http://floci-gcp.floci-gcp.svc.cluster.local:4588/sql/v1beta4/"
+      kms_custom_endpoint            = "http://floci-gcp.floci-gcp.svc.cluster.local:4588/v1/"
+    }

@@ -1,0 +1,18 @@
+# AcceptAPI: registers the krop-published gcp-prod provider (ODC production
+# adapter chain: provider-gcp -> Crossplane -> terraform -> floci-gcp) with the
+# broker for region de. Region carve-out: the job-based gcp provider keeps eu,
+# de is realized by the production chain. Created in root:gcp-prod; requires
+# the acceptapis binding there (setup.bash does both).
+apiVersion: broker.platform-mesh.io/v1alpha1
+kind: AcceptAPI
+metadata:
+  name: objectstorages.storage.example.io
+spec:
+  apiExportName: objectstorages.storage.example.io
+  filters:
+    - key: region
+      valueIn: [de]
+  gvr:
+    group: storage.example.io
+    resource: objectstorages
+    version: v1alpha1
