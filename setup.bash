@@ -504,6 +504,8 @@ _object_storage_migrator() {
     log "Loading $image into kind cluster $KIND_CLUSTER"
     kind load docker-image "$image" --name "$KIND_CLUSTER" \
         || die "Failed to load $image into kind"
+    log "Install MigrationConfiguration"
+    kubectl::apply "$ws_rb" ./platform/migrationconfiguration.yaml
 }
 
 _setup() {
