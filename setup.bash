@@ -372,6 +372,13 @@ _krop() {
     # create a kubectl and store it as a secret for krop-controller to use
     kubectl --kubeconfig "$kind_platform" apply \
         -f ./providers/krop/kind-kubectl.yaml
+    # Greenfield race: the kcp-operator needs a moment to mint the secret from
+    # the Kubeconfig CR. Without this wait the pipeline below silently produces
+    # an EMPTY kubeconfig (kubectl fails, but base64|sed exit 0), the chart
+    # mounts an empty file and the controller falls back to in-cluster config.
+    kubectl --kubeconfig "$kind_platform" -n platform-mesh-system \
+        wait --for=create secret/krop-controller-kubeconfig --timeout="$timeout" \
+        || die "krop-controller-kubeconfig secret was not minted"
 
     # export the host and rewrite the target host at the same time
     # rewrite at the same time because mac defaults to non-gnu sed and
@@ -384,6 +391,7 @@ _krop() {
         | sed -e "s#root.kcp.localhost#frontproxy-front-proxy.platform-mesh-system.svc.cluster.local#g" \
         | sed -e "s#/clusters/root#/clusters/root:$provider#g" \
         > "$krop_kubeconfig"
+    [[ -s "$krop_kubeconfig" ]] || die "extracted krop kubeconfig is empty"
 
     kubectl create namespace "$kind_namespace" \
         --dry-run=client -o yaml \
@@ -426,6 +434,15 @@ _provider_gcp() {
 
 
     log "Publishing the ObjectStorage blueprint (gcp)"
+    # Greenfield race: _krop applied the CRDs seconds ago — gate on Established
+    # and use the full resource name (the rgd shortname is not in kubectl's
+    # discovery until the CRD has settled).
+    for crd in resourcegraphdefinitions.krop.opendefense.cloud jobs.batch; do
+        KUBECONFIG="$ws_admin" kubectl wait --for=condition=Established \
+            "crd/$crd" --timeout="$timeout" \
+            || die "CRD $crd not established"
+    done
+   
     kubectl::apply "$ws_admin" ./providers/gcp/manifests/blueprint-objectstorage.yaml
     KUBECONFIG="$ws_admin" kubectl wait rgd.krop.opendefense.cloud/objectstorage \
         --for=jsonpath='{.status.exportedAPI}'=objectstorages.storage.example.io \
