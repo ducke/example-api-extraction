@@ -412,14 +412,9 @@ _krop() {
 }
 
 _floci() {
-    local name="$1"
-    shift
-
-    if docker ps --all --format '{{.Names}}' | grep -q "^${name}$"; then
-        # exists, do nothing
-        return
-    fi
-    docker run --network kind -d --name "$name" "$@"
+    # The blueprint's host Job targets the in-cluster floci service (stable svc
+    # DNS, verified) — deploy it alongside the docker-network variant above.
+    kubectl::kustomize "$kind_platform" ./kind/manifests
 }
 
 # _provider_X creates the provider's kcp workspace, then wires krop to it.
@@ -429,12 +424,6 @@ _provider_gcp() {
     kcp::create_workspace "$kcp_admin" "$ws_admin" "gcp"
     _krop gcp root:gcp "$ws_admin" "$kind_namespace"
 
-    log "Deploy floci gcp"
-    _floci floci-gcp -p 4588:4588 \
-      floci/floci-gcp:latest
-    # The blueprint's host Job targets the in-cluster floci service (stable svc
-    # DNS, verified) — deploy it alongside the docker-network variant above.
-    kubectl::kustomize "$kind_platform" ./kind/manifests
 
     log "Publishing the ObjectStorage blueprint (gcp)"
     kubectl::apply "$ws_admin" ./providers/gcp/manifests/blueprint-objectstorage.yaml
@@ -470,12 +459,6 @@ _provider_aws() {
     local ws_admin="$kubeconfigs/workspaces/aws.admin.kubeconfig"
     kcp::create_workspace "$kcp_admin" "$ws_admin" "aws"
     _krop aws root:aws "$ws_admin" "$kind_namespace"
-
-    log "Deploy floci aws"
-    # All 68 services on :4566
-    _floci floci -p 4566:4566 \
-      -v /var/run/docker.sock:/var/run/docker.sock \
-      floci/floci:latest
 }
 
 _provider_azure() {
@@ -483,13 +466,6 @@ _provider_azure() {
     local ws_admin="$kubeconfigs/workspaces/azure.admin.kubeconfig"
     kcp::create_workspace "$kcp_admin" "$ws_admin" "azure"
     _krop azure root:azure "$ws_admin" "$kind_namespace"
-
-    log "Deploy floci azure"
-    # REST :4577 · Event Hubs AMQP :5672 · Service Bus AMQP :5673
-    _floci floci-az -p 4577:4577 \
-      -p 5672:5672 \
-      -p 5673:5673 \
-      floci/floci-az:latest
 }
 
 _setup() {
@@ -498,6 +474,7 @@ _setup() {
     _provider_workspace
     _platform_apis
     _broker
+    _floci # deploy floci instances in the kind cluster
     # Path B (the decided architecture): krop-controller per provider workspace,
     # blueprint-resident realization, no api-syncagent.
     _provider_gcp
