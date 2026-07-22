@@ -1,0 +1,55 @@
+# TEMPLATE — how to point gcp-prod at REAL GCP instead of the floci-gcp emulator.
+#
+# The committed clusterproviderconfig.yaml ships the emulator variant (fake-token,
+# floci-gcp custom endpoints) so gcp-prod works out-of-the-box with no credentials.
+# To provision against real GCP, copy this file over clusterproviderconfig.yaml and
+# supply a real service-account key:
+#
+#   1. Create a GCP service account with storage admin on the target project and
+#      download its JSON key.
+#   2. Create the key as a secret the provider-terraform ClusterProviderConfig reads
+#      (source: Secret), e.g.:
+#        kubectl -n crossplane-system create secret generic gcp-credentials \
+#          --from-file=credentials=/path/to/key.json
+#   3. Drop the *_custom_endpoint overrides and the fake access_token below so the
+#      google provider talks to the real googleapis.com endpoints.
+#
+# This is the same credential convention as azure-prod
+# (providers/azure-prod/host/aso-controller-settings.secret.example.yaml): a committed
+# .example template documents the real-cloud variant; the real values live in a file
+# that setup.bash guards on. For gcp-prod the real file is committed (fake emulator
+# values) so nothing must be supplied; for azure-prod the real file is gitignored and
+# setup.bash fails if it is missing.
+apiVersion: tf.m.upbound.io/v1beta1
+kind: ClusterProviderConfig
+metadata:
+  name: floci-gcp
+spec:
+  credentials:
+    - filename: gcp-credentials.json
+      source: Secret
+      secretRef:
+        namespace: crossplane-system
+        name: gcp-credentials
+        key: credentials
+  configuration: |
+    terraform {
+      backend "kubernetes" {
+        secret_suffix     = "cpc-floci-gcp"
+        namespace         = "crossplane-system"
+        in_cluster_config = true
+      }
+      required_providers {
+        google = {
+          source  = "hashicorp/google"
+          version = "~> 7.36"
+        }
+      }
+    }
+
+    provider "google" {
+      project = "REPLACE_WITH_YOUR_GCP_PROJECT"
+      region  = "europe-west4"
+      # credentials are injected from the secret above; no access_token / no
+      # *_custom_endpoint overrides -> the provider talks to real googleapis.com.
+    }
