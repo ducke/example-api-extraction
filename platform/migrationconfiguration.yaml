@@ -31,6 +31,7 @@ spec:
                   - name: copy
                     # from ./platform/object-storage-migrator
                     image: localhost/object-storage-migrator:latest
+                    imagePullPolicy: Never
                     env:
                       - name: ORIGIN_URI
                         value: ${from.status.url}
