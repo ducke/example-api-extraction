@@ -1,0 +1,95 @@
+# Komposition: GCPBucket -> namespaced Terraform-Workspace gegen floci-gcp.
+# Namespaced XRs können nur namespaced Ressourcen komponieren, daher die
+# tf.m.upbound.io-Variante (die ist später auch die richtige für den
+# api-syncagent Richtung kcp).
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: gcpbucket-floci-gcp
+spec:
+  compositeTypeRef:
+    apiVersion: gcp.opendefense.cloud/v1alpha1
+    kind: GCPBucket
+  mode: Pipeline
+  pipeline:
+    - step: patch-and-transform
+      functionRef:
+        name: function-patch-and-transform
+      input:
+        apiVersion: pt.fn.crossplane.io/v1beta1
+        kind: Resources
+        resources:
+          - name: workspace
+            base:
+              apiVersion: tf.m.upbound.io/v1beta1
+              kind: Workspace
+              spec:
+                providerConfigRef:
+                  kind: ClusterProviderConfig
+                  name: floci-gcp
+                forProvider:
+                  source: Inline
+                  module: |
+                    variable "name" {
+                      type = string
+                    }
+                    variable "location" {
+                      type = string
+                    }
+                    variable "storage_class" {
+                      type    = string
+                      default = "STANDARD"
+                    }
+
+                    resource "google_storage_bucket" "this" {
+                      name          = var.name
+                      location      = var.location
+                      storage_class = var.storage_class
+                      force_destroy = true
+
+                      uniform_bucket_level_access = false
+
+                      labels = {
+                        ordered-via = "crossplane-claim"
+                      }
+                    }
+
+                    output "bucket_url" {
+                      value = google_storage_bucket.this.url
+                    }
+                  vars:
+                    - key: name
+                      value: overridden-by-patch
+                    - key: location
+                      value: "US"
+                    - key: storage_class
+                      value: "STANDARD"
+            patches:
+              # Bucket-Name: <namespace>-<name> der Bestellung — kollisionsfrei
+              # über Namespaces hinweg (GCS-Bucket-Namen sind global).
+              - type: CombineFromComposite
+                combine:
+                  variables:
+                    - fromFieldPath: metadata.namespace
+                    - fromFieldPath: metadata.name
+                  strategy: string
+                  string:
+                    fmt: "%s-%s"
+                toFieldPath: spec.forProvider.vars[0].value
+              # Expliziter Bucket-Name (vom provider-gcp-Adapter gesetzt) hat
+              # Vorrang; fehlt er, bleibt der <ns>-<name>-Fallback oben stehen.
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.bucketName
+                toFieldPath: spec.forProvider.vars[0].value
+                policy:
+                  fromFieldPath: Optional
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.location
+                toFieldPath: spec.forProvider.vars[1].value
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.storageClass
+                toFieldPath: spec.forProvider.vars[2].value
+              # Terraform-Output zurück in den Bestell-Status (Portal-Spalte).
+              - type: ToCompositeFieldPath
+                fromFieldPath: status.atProvider.outputs.bucket_url
+                toFieldPath: status.bucketUrl

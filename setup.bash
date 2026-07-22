@@ -496,6 +496,75 @@ _provider_azure() {
     krop::register azure "$ws_admin"
 }
 
+# gcp-prod (region de): the same krop pattern, but the blueprint's host-target
+# resource is a CloudAPI Bucket (storage.opendefense.cloud) realized by ODC's
+# UNCHANGED production adapter chain: provider-gcp -> GCPBucket (Crossplane
+# claim) -> provider-terraform -> floci-gcp. See providers/gcp-prod/README.md.
+# Not part of the default `setup` chain - it needs the ODC-internal provider-gcp
+# source checkout to build the adapter image (the CI image is amd64-only).
+PROVIDER_GCP_SRC="${PROVIDER_GCP_SRC:-$HOME/dev/gitlab.opendefense.cloud/odc/cat/cloudapi/provider-gcp}"
+
+# _host_gcp_prod installs the production realization chain on the kind cluster:
+# Crossplane + provider-terraform (endpoints target the in-cluster floci-gcp
+# from kind/manifests), the CloudAPI Bucket CRD, the GCPBucket XRD/Composition
+# and the provider-gcp adapter (built locally for the host arch).
+_host_gcp_prod() {
+    log "Installing Crossplane + provider-terraform (host)"
+    helm::repo crossplane-stable https://charts.crossplane.io/stable
+    helm --kubeconfig "$kind_platform" upgrade --install crossplane \
+        crossplane-stable/crossplane \
+        -n crossplane-system --create-namespace --wait --timeout "$timeout" \
+        || die "crossplane install failed"
+    kubectl::apply "$kind_platform" \
+        ./providers/gcp-prod/host/provider-terraform.yaml \
+        ./providers/gcp-prod/host/function-patch-and-transform.yaml
+    local pkg
+    for pkg in provider.pkg.crossplane.io/provider-terraform \
+        function.pkg.crossplane.io/function-patch-and-transform; do
+        kubectl --kubeconfig "$kind_platform" wait "$pkg" \
+            --for=condition=Healthy --timeout="$timeout" \
+            || die "$pkg did not become Healthy"
+    done
+    # The ClusterProviderConfig CRD is registered by the provider package -
+    # kubectl::apply retries bridge the gap.
+    kubectl::apply "$kind_platform" \
+        ./providers/gcp-prod/host/clusterproviderconfig.yaml \
+        ./providers/gcp-prod/host/buckets.storage.opendefense.cloud.crd.yaml \
+        ./providers/gcp-prod/host/xrd-gcpbucket.yaml
+    kubectl --kubeconfig "$kind_platform" wait \
+        xrd/gcpbuckets.gcp.opendefense.cloud \
+        --for=condition=Established --timeout="$timeout" \
+        || die "GCPBucket XRD not established"
+    kubectl::apply "$kind_platform" ./providers/gcp-prod/host/composition-gcpbucket.yaml
+
+    log "Building the provider-gcp adapter locally (the CI image is amd64-only)"
+    [[ -d "$PROVIDER_GCP_SRC" ]] \
+        || die "provider-gcp source not found at $PROVIDER_GCP_SRC - set PROVIDER_GCP_SRC (ODC-internal repo)"
+    docker build -t provider-gcp:hackathon-local "$PROVIDER_GCP_SRC" \
+        || die "provider-gcp image build failed"
+    kind load docker-image provider-gcp:hackathon-local --name "$KIND_CLUSTER" \
+        || die "Failed to load provider-gcp image into kind"
+    kubectl::apply "$kind_platform" ./providers/gcp-prod/host/provider-gcp.yaml
+    kubectl::wait "$kind_platform" deployment/provider-gcp gcp-system condition=Available
+}
+
+_provider_gcp_prod() {
+    local kind_namespace="gcp-prod"
+    local ws_admin="$kubeconfigs/workspaces/gcp-prod.admin.kubeconfig"
+    kcp::create_workspace "$kcp_admin" "$ws_admin" "gcp-prod"
+    _krop gcp-prod root:gcp-prod "$ws_admin" "$kind_namespace"
+
+    # kro type-checks blueprint children against the workspace API surface -
+    # the host-target Bucket needs its CRD in the workspace (same pattern as
+    # the jobs.batch schema CRD in _krop).
+    kubectl::apply "$ws_admin" ./providers/gcp-prod/host/buckets.storage.opendefense.cloud.crd.yaml
+    KUBECONFIG="$ws_admin" kubectl wait --for=condition=Established \
+        crd/buckets.storage.opendefense.cloud --timeout="$timeout" \
+        || die "buckets CRD not established in root:gcp-prod"
+
+    krop::register gcp-prod "$ws_admin"
+}
+
 _setup() {
     _kubeconfig
     _kcp
@@ -535,5 +604,6 @@ case "${1:-setup}" in
     (syncagent-gcp) _kubeconfig; _kcp; _gcp_provider ;;
     (consumer) _kubeconfig; _kcp; _consumer ;;
     (krop-providers) _kubeconfig; _kcp; _provider_gcp; _provider_aws; _provider_azure ;;
-    (*) die "Unknown command: $1 (want: setup | kubeconfig | broker | gcp | syncagent-gcp | consumer | krop-providers)" ;;
+    (gcp-prod) _kubeconfig; _kcp; _host_gcp_prod; _provider_gcp_prod ;;
+    (*) die "Unknown command: $1 (want: setup | kubeconfig | broker | gcp | syncagent-gcp | consumer | krop-providers | gcp-prod)" ;;
 esac

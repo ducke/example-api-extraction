@@ -1,0 +1,8 @@
+# Crossplane v2 kennt nur noch Pipeline-Compositions — Patch & Transform
+# läuft als Composition Function.
+apiVersion: pkg.crossplane.io/v1
+kind: Function
+metadata:
+  name: function-patch-and-transform
+spec:
+  package: xpkg.crossplane.io/crossplane-contrib/function-patch-and-transform:v0.10.7

@@ -1,0 +1,57 @@
+# krop blueprint: publishes storage.example.io/ObjectStorage from root:gcp-prod
+# and realizes it via ODC's UNCHANGED production adapter chain — the host-target
+# resource is a CloudAPI Bucket (storage.opendefense.cloud), reconciled by
+# provider-gcp -> GCPBucket (Crossplane claim) -> provider-terraform -> floci-gcp.
+# The blueprint IS the adapter between the standard API and the production type:
+# zero code changes in the operator.
+#
+# Notes:
+#   - the Bucket's metadata.namespace MUST match the krop-controller namespace
+#     (here: gcp-prod, the _provider_gcp_prod release namespace)
+#   - requires the buckets.storage.opendefense.cloud CRD in the workspace
+#     (providers/gcp-prod/host/buckets.storage.opendefense.cloud.crd.yaml,
+#     applied by _provider_gcp_prod): kro type-checks children against the
+#     workspace API surface
+#   - spec.bucketName is set explicitly from the order name: it is the
+#     operator's documented override and sidesteps the api-syncagent
+#     remote-object-name annotations krop does not stamp (the materialized
+#     host name is mangled). The operator appends a uniqueness suffix, so the
+#     resulting URL is gs://<order>-<hash6> — provider-specific naming policy.
+#   - lifecycle is fully declarative: migrating away deletes the staged
+#     instance -> OwnerRef GC -> GCPBucket -> terraform destroy removes the
+#     bucket from floci-gcp. No create-only 409 handling needed here.
+#
+# CEL/YAML traps handled: quoted status ternary; status expressions cannot
+# reference schema and are dry-run at build time -> only optional access
+# (.?/orValue) on the host resource's status.
+apiVersion: krop.opendefense.cloud/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: objectstorage
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: ObjectStorage
+    group: storage.example.io
+    spec:
+      region: string
+      versioning: boolean
+    status:
+      url: ${bucket.status.?endpoint.orValue("")}
+      status: '${bucket.status.?endpoint.orValue("") != "" ? "Available" : "Provisioning"}'
+  resources:
+    - id: bucket
+      target: host
+      readyWhen:
+        - ${bucket.status.?endpoint.orValue("") != ""}
+      template:
+        apiVersion: storage.opendefense.cloud/v1alpha1
+        kind: Bucket
+        metadata:
+          name: ${schema.metadata.name}
+          namespace: gcp-prod # must match the krop-controller namespace
+        spec:
+          bucketName: ${schema.metadata.name}
+          region: ${schema.spec.region}
+          storageClass: standard
+          description: ordered via storage.example.io (broker-routed, region de)
