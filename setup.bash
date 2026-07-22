@@ -138,32 +138,18 @@ EOF
     cp "$kubeconfigs/provider-incluster.kubeconfig" "$ws_provider"
     yq -i ".clusters[].cluster.server |= sub(\"${PM_KCP_INCLUSTER}\"; \"kcp.api.portal.localhost:8443\")" \
         "$ws_provider" || die "Failed to rewrite provider kubeconfig host"
-
-    # The provisioned workspace only binds the platform-mesh APIs. The broker
-    # needs the tenancy API to create its verify-*/staging-* child workspaces —
-    # bind it as admin (the scoped provider SA may not bind root exports).
-    log "Binding the tenancy API into the provider workspace"
-    local provider_admin="$kubeconfigs/provider-admin.kubeconfig"
-    admin::ws_kubeconfig "$provider_admin" "$(provider::path)"
-    cat <<'EOF' | KUBECONFIG="$provider_admin" kubectl apply -f - || die "Failed to bind tenancy API"
-apiVersion: apis.kcp.io/v1alpha2
-kind: APIBinding
-metadata:
-  name: tenancy.kcp.io
-spec:
-  reference:
-    export:
-      path: root
-      name: tenancy.kcp.io
-EOF
-    KUBECONFIG="$provider_admin" kubectl wait --for=condition=Ready=True \
-        apibinding/tenancy.kcp.io --timeout="$timeout" \
-        || die "tenancy API binding not ready"
+    # (No tenancy binding needed here anymore: the broker's coordination and
+    # verify-*/staging-* trees live under root:resource-broker, which is an
+    # admin-created workspace that serves tenancy natively.)
 }
 
 _platform_apis() {
-    log "Installing coordination CRDs into the provider workspace"
-    kubectl::apply "$ws_provider" \
+    log "Creating staging and verification workspaces under root:resource-broker"
+    workspace::create "$ws_rb" "$ws/staging.kubeconfig" "staging"
+    workspace::create "$ws_rb" "$ws/verification.kubeconfig" "verification"
+
+    log "Installing coordination CRDs into root:resource-broker"
+    kubectl::apply "$ws_rb" \
         ./config/coordbroker/crd/coord.broker.platform-mesh.io_assignments.yaml \
         ./config/coordbroker/crd/coord.broker.platform-mesh.io_migrationconfigurations.yaml \
         ./config/coordbroker/crd/coord.broker.platform-mesh.io_migrations.yaml \
@@ -171,7 +157,7 @@ _platform_apis() {
     # The broker's coordination provider dies permanently if these kinds are not
     # discoverable when it starts (greenfield race) — gate on Established.
     for crd in assignments migrationconfigurations migrations stagingworkspaces; do
-        KUBECONFIG="$ws_provider" kubectl wait --for=condition=Established \
+        KUBECONFIG="$ws_rb" kubectl wait --for=condition=Established \
             "crd/${crd}.coord.broker.platform-mesh.io" --timeout="$timeout" \
             || die "coordination CRD $crd not established"
     done
@@ -211,36 +197,25 @@ _broker() {
     log "Deploying resource-broker (targets its provisioned provider workspace)"
     kubectl::kustomize "$kind_platform" ./platform/manifests
 
-    local wspath
-    wspath="$(provider::path)"
+    # Admin kubeconfig, NOT the provisioned provider kubeconfig: that SA is
+    # scoped to its own logical cluster (authentication.kcp.io/scopes), so it
+    # cannot enter the coordination/staging/verification workspaces, and kcp's
+    # apibinder initializer — acting as the workspace creator — could not
+    # initialize the broker-created child workspaces.
+    KUBECONFIG="$kcp_admin" kubectl ws use :root:providers \
+        || die "Failed to enter root:providers"
+    local provider_ws_name="$(KUBECONFIG="$kcp_admin" kubectl get workspaces -o name | grep -o 'resource-broker-[a-z0-9]*' | head -1)"
+    KUBECONFIG="$kcp_admin" kubectl ws use :root
+    [[ -n "$provider_ws_name" ]] || die "Failed to find provisioned provider workspace under root:providers"
+    local provider_ws_path="root:providers:$provider_ws_name"
 
-    # NOT the provisioned provider kubeconfig: that SA is scoped to its own
-    # logical cluster (authentication.kcp.io/scopes), so kcp's apibinder
-    # initializer — which acts as the workspace creator — cannot initialize the
-    # broker's verify-*/staging-* child workspaces, and the broker cannot enter
-    # them. Mount an admin kubeconfig targeting the provider workspace via the
-    # in-cluster front-proxy instead (same approach as the standalone
-    # broker-postgres example, which uses the kcp-operator admin kubeconfig).
-    local broker_kubeconfig="$kubeconfigs/broker-incluster.kubeconfig"
-    admin::ws_kubeconfig "$broker_kubeconfig" "$wspath" "$PM_KCP_INCLUSTER"
+    kcp::kubeconfig::workspace "$kcp_admin" \
+        "$kubeconfigs/broker-incluster.kubeconfig" \
+        "$provider_ws_path" "$PM_KCP_INCLUSTER"
+
     kubectl create secret generic kcp-kubeconfig --namespace=resource-broker-system --dry-run=client -o yaml \
-        --from-file=kubeconfig="$broker_kubeconfig" \
+        --from-file=kubeconfig="$kubeconfigs/broker-incluster.kubeconfig" \
         | kubectl::apply "$kind_platform" "-"
-
-    # The broker's workspace-tree defaults (root:platform:broker:*) come from
-    # the standalone example; point them at the provisioned workspace. Replacing
-    # the full args array keeps this idempotent across reruns.
-    kubectl --kubeconfig "$kind_platform" -n resource-broker-system patch deployment resource-broker \
-        --type json -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args\",\"value\":[
-            \"-kubeconfig=/kubeconfig/kubeconfig\",
-            \"-kcp-kubeconfig=/kubeconfig/kubeconfig\",
-            \"-compute-kubeconfig=/compute-kubeconfig/kubeconfig\",
-            \"-acceptapi=acceptapis\",
-            \"-requeue-interval=1s\",
-            \"-coordination-workspace=$wspath\",
-            \"-verification-tree-root=$wspath\",
-            \"-staging-tree-root=$wspath\"]}]" \
-        || die "Failed to patch broker workspace-tree flags"
 
     kubectl::wait "$kind_platform" deployment/resource-broker resource-broker-system condition=Available
 }
@@ -382,38 +357,65 @@ _consumer() {
     log "Order fulfilled: $(KUBECONFIG="$ws_consumer" kubectl get objectstorage bucket-from-consumer -o jsonpath='{.status.url}')"
 }
 
-_kro() {
+_krop() {
     local provider="$1"
     local ws_path="$2"
     local ws_admin="$3"
-    shift 3
+    local kind_namespace="$4"
 
-    log "Installing the kro CRDs into $ws_path"
-    kubectl apply --kubeconfig "$ws_admin" \
-        -f "https://raw.githubusercontent.com/kubernetes-sigs/kro/main/helm/crds/kro.run_resourcegraphdefinitions.yaml"
+    local krop_kubeconfig="$kubeconfigs/workspaces/gcp.krop.kubeconfig"
 
-    log "Create in-cluster kubeconfig for kro targeting the workspace"
-    local ws_incluster="$kubeconfigs/workspaces/${provider}.kubeconfig"
-    kcp::kubeconfig::workspace "$kcp_admin" "$ws_incluster" "$ws_path" "$PM_KCP_INCLUSTER"
+    # setup RBAC in kcp, we are reusing the same service account for all providers
+    kubectl --kubeconfig "$kcp_admin" apply -f ./providers/krop/kcp-root-rbac.yaml
+    kubectl --kubeconfig "$ws_admin" apply -f ./providers/krop/kcp-provider-rbac.yaml
 
-    log "Installing kro for the $provider provider workspace"
-    helm::install::kro::workspace "$kind_platform" \
-        "kro-${provider}" \
-        "$ws_incluster" \
-        "kro-${provider}-system" \
-        "kro-kubeconfig"
+    # create a kubectl and store it as a secret for krop-controller to use
+    kubectl --kubeconfig "$kind_platform" apply \
+        -f ./providers/krop/kind-kubectl.yaml
 
-    kubectl::wait "$kind_platform" \
-        deployment/kro-${provider} \
-        "kro-${provider}-system" \
-        condition=Available
+    # export the host and rewrite the target host at the same time
+    # rewrite at the same time because mac defaults to non-gnu sed and
+    # tahts annoying
+    kubectl --kubeconfig "$kind_platform" \
+        -n platform-mesh-system \
+        get secrets krop-controller-kubeconfig \
+        -o jsonpath='{.data.kubeconfig}' \
+        | base64 -d \
+        | sed -e "s#root.kcp.localhost#frontproxy-front-proxy.platform-mesh-system.svc.cluster.local#g" \
+        | sed -e "s#/clusters/root#/clusters/root:$provider#g" \
+        > "$krop_kubeconfig"
+
+    kubectl create namespace "$kind_namespace" \
+        --dry-run=client -o yaml \
+        | kubectl --kubeconfig "$kind_platform" apply -f-
+
+    kubectl -n "$kind_namespace" create secret generic krop-kubeconfig \
+        --from-file=kubeconfig="$krop_kubeconfig" \
+        --dry-run=client -o yaml \
+        | kubectl --kubeconfig "$kind_platform" apply -f-
+
+    kustomize build --enable-helm "./providers/krop/$provider" \
+        | kubectl --kubeconfig "$kind_platform" apply -f- \
+        || die "Failed to deploy krop-controller for $provider"
+
+    kubectl --kubeconfig "$ws_admin" apply -f ./providers/krop/kcp-provider-crd.yaml
+    # As noted in https://github.com/platform-mesh/example-api-extraction/pull/10#issuecomment-5043180426
+    # The krop-controller engages the clients with all control planes so
+    # deploying a job resource fails unless the kcp workspace has the
+    # Job API resource.
+    # To prevent this we install the job CRD even though it isn't used.
+    # TODO(ntnn): Report upstream.
+    kubectl --kubeconfig "$ws_admin" apply -f ./providers/krop/kcp-provider-crd-jobs.yaml
+
+    # then create an RGD like described here:
+    # https://github.com/opendefensecloud/krop-controller/blob/main/docs/getting-started.md#3a-install-the-blueprint-crd-into-the-provider-workspace
 }
 
 _floci() {
     local name="$1"
     shift
 
-    if docker ps --all --quiet | grep -q "^${name}$"; then
+    if docker ps --all --format '{{.Names}}' | grep -q "^${name}$"; then
         # exists, do nothing
         return
     fi
@@ -422,9 +424,10 @@ _floci() {
 
 # _provider_X creates the provider's kcp workspace, then wires kro to it.
 _provider_gcp() {
+    local kind_namespace="gcp"
     local ws_admin="$kubeconfigs/workspaces/gcp.admin.kubeconfig"
     kcp::create_workspace "$kcp_admin" "$ws_admin" "gcp"
-    _kro gcp root:gcp "$ws_admin"
+    _krop gcp root:gcp "$ws_admin" "$kind_namespace"
 
     log "Deploy floci gcp"
     _floci floci-gcp -p 4588:4588 \
@@ -432,9 +435,10 @@ _provider_gcp() {
 }
 
 _provider_aws() {
+    local kind_namespace="aws"
     local ws_admin="$kubeconfigs/workspaces/aws.admin.kubeconfig"
     kcp::create_workspace "$kcp_admin" "$ws_admin" "aws"
-    _kro aws root:aws "$ws_admin"
+    _krop aws root:aws "$ws_admin" "$kind_namespace"
 
     log "Deploy floci aws"
     # All 68 services on :4566
@@ -444,9 +448,10 @@ _provider_aws() {
 }
 
 _provider_azure() {
+    local kind_namespace="azure"
     local ws_admin="$kubeconfigs/workspaces/azure.admin.kubeconfig"
     kcp::create_workspace "$kcp_admin" "$ws_admin" "azure"
-    _kro azure root:azure "$ws_admin"
+    _krop azure root:azure "$ws_admin" "$kind_namespace"
 
     log "Deploy floci azure"
     # REST :4577 · Event Hubs AMQP :5672 · Service Bus AMQP :5673
@@ -469,11 +474,11 @@ _setup() {
     # Ready, patching the order's region from eu to us triggers the broker
     # migration.
     #
-    # _provider_gcp/_provider_aws/_provider_azure (kro running per provider
-    # workspace, floci as docker containers on the kind network) are an
-    # alternative realization in progress — run them via
-    # `setup.bash kro-providers`. Note: _provider_gcp shares root:gcp with
-    # _gcp_provider; don't run both against the same workspace.
+    # _provider_gcp/_provider_aws/_provider_azure (krop-controller per provider
+    # workspace, floci as docker containers on the kind network) are the Path-B
+    # realization — run them via `setup.bash krop-providers`. Note:
+    # _provider_gcp shares root:gcp with _gcp_provider; don't run both against
+    # the same workspace.
     log "Setup complete: order routed through the broker to the gcp provider."
     log "Marketplace view:"
     log "  kubectl --kubeconfig $ws_provider get apiexports,contentconfigurations,providermetadatas"
@@ -485,6 +490,6 @@ case "${1:-setup}" in
     (broker) _kubeconfig; _kcp; _broker ;;
     (gcp) _kubeconfig; _kcp; _gcp_provider ;;
     (consumer) _kubeconfig; _kcp; _consumer ;;
-    (kro-providers) _kubeconfig; _kcp; _provider_gcp; _provider_aws; _provider_azure ;;
-    (*) die "Unknown command: $1 (want: setup | kubeconfig | broker | gcp | consumer | kro-providers)" ;;
+    (krop-providers) _kubeconfig; _kcp; _provider_gcp; _provider_aws; _provider_azure ;;
+    (*) die "Unknown command: $1 (want: setup | kubeconfig | broker | gcp | consumer | krop-providers)" ;;
 esac
