@@ -42,6 +42,14 @@ spec:
     status:
       url: ${account.status.?primaryEndpoints.blob.orValue("")}
       status: '${account.status.?primaryEndpoints.blob.orValue("") != "" ? "Available" : "Provisioning"}'
+      relatedResources:
+        credentials:
+          gvk:
+            group: '${credentials.apiVersion.contains("/") ? credentials.apiVersion.split("/")[0] : ""}'
+            version: '${credentials.apiVersion.contains("/") ? credentials.apiVersion.split("/")[1] : credentials.apiVersion}'
+            kind: ${credentials.kind}
+          name: ${credentials.metadata.name}
+          namespace: ${credentials.metadata.namespace}
   resources:
     - id: resourceGroup
       target: host
@@ -79,6 +87,15 @@ spec:
             # owner refs must point at the real object name. Also makes kro order
             # creation: account after resourceGroup.
             name: ${resourceGroup.metadata.name}
+          operatorSpec:
+            secrets:
+              # ASO v20250601 exposes account keys as key1/key2
+              key1:
+                name: ${schema.metadata.name}-aso-keys
+                key: key
+              blobEndpoint:
+                name: ${schema.metadata.name}-aso-keys
+                key: blobEndpoint
     - id: blobService
       target: host
       template:
@@ -105,3 +122,25 @@ spec:
           azureName: ${schema.metadata.name}
           owner:
             name: ${blobService.metadata.name}
+    - id: asoKeys
+      target: host
+      externalRef:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: ${schema.metadata.name}-aso-keys
+          namespace: azure-prod
+    - id: credentials
+      target: consumer
+      template:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: ${schema.metadata.name}-credentials
+          namespace: ${schema.metadata.namespace}
+        # kro types the ASO secret's .data as already decoded bytes
+        stringData:
+          url: ${"az://" + schema.metadata.name}
+          account: ${account.spec.azureName}
+          key: ${string(asoKeys.data.key)}
+          endpoint: ${string(asoKeys.data.blobEndpoint)}
