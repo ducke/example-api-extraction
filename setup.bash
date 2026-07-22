@@ -478,7 +478,9 @@ _setup() {
     # Path B (the decided architecture): krop-controller per provider workspace,
     # blueprint-resident realization, no api-syncagent.
     _provider_gcp
-    _consumer
+    _provider_aws
+    _provider_azure
+    # _consumer
     # The AWS provider is implemented separately (see providers/aws/README.md):
     # under Path B that is _provider_aws plus an AWS blueprint (the gcp one with
     # the S3 PUT) and an AcceptAPI with region us. Once it is Ready, patching an
