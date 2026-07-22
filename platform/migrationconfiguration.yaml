@@ -27,27 +27,10 @@ spec:
             template:
               spec:
                 restartPolicy: OnFailure
-                # The secrets are mounted into the job container, the
-                # script in object-storage-migrator inspects the mounts
-                # to pull the correct credentials.
-                volumes:
-                  - name: origin-creds
-                    secret:
-                      secretName: from-${from.status.relatedResources.credentials.name}
-                  - name: destination-creds
-                    secret:
-                      secretName: to-${to.status.relatedResources.credentials.name}
                 containers:
                   - name: copy
                     # from ./platform/object-storage-migrator
                     image: localhost/object-storage-migrator:latest
-                    volumeMounts:
-                      - name: origin-creds
-                        mountPath: /creds/origin
-                        readOnly: true
-                      - name: destination-creds
-                        mountPath: /creds/destination
-                        readOnly: true
                     env:
                       - name: ORIGIN_URI
                         value: ${from.status.url}

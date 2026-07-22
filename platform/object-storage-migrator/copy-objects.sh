@@ -6,7 +6,6 @@ set -eu
 setenv() {
     remote="$1"
     uri="$2"
-    dir="$3"
 
     case "$uri" in
         # these are just guess values from claude, real values tbd
@@ -33,7 +32,7 @@ setenv() {
     esac
 }
 
-setenv origin "$ORIGIN_URI" /creds/origin
-setenv dest "$DESTINATION_URI" /creds/destination
+setenv origin "$ORIGIN_URI"
+setenv dest "$DESTINATION_URI"
 
 exec rclone copy "origin:${ORIGIN_PATH}" "dest:${DESTINATION_PATH}" --progress
