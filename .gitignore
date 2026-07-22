@@ -1,3 +1,7 @@
 /bin
 *.kubeconfig
 charts/
+# real Azure service principal for azure-prod (the .example template is tracked)
+/providers/azure-prod/host/aso-controller-settings.secret.yaml
+# real GCP service account credentials
+/providers/gcp-prod/host/gcp-credentials.json

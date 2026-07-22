@@ -529,6 +529,21 @@ _host_gcp_prod() {
             --for=condition=Healthy --timeout="$timeout" \
             || die "$pkg did not become Healthy"
     done
+    # Optional real GCP credentials: if a service-account key is present at the
+    # gitignored path, create the secret the ClusterProviderConfig reads
+    # (source: Secret, crossplane-system/gcp-credentials/credentials - see
+    # clusterproviderconfig.yaml.example). Absent -> the committed
+    # clusterproviderconfig.yaml runs against the floci-gcp emulator (fake token).
+    local gcp_creds=./providers/gcp-prod/host/gcp-credentials.json
+    if [[ -f "$gcp_creds" ]]; then
+        log "Found $gcp_creds - creating gcp-credentials secret (real GCP)"
+        kubectl --kubeconfig "$kind_platform" -n crossplane-system \
+            create secret generic gcp-credentials \
+            --from-file=credentials="$gcp_creds" \
+            --dry-run=client -o yaml \
+            | kubectl --kubeconfig "$kind_platform" apply -f- \
+            || die "failed to create gcp-credentials secret"
+    fi
     # The ClusterProviderConfig CRD is registered by the provider package -
     # kubectl::apply retries bridge the gap.
     kubectl::apply "$kind_platform" \
@@ -571,6 +586,91 @@ _provider_gcp_prod() {
     krop::register gcp-prod "$ws_admin"
 }
 
+# azure-prod (region nl): the same krop pattern, but the blueprint's host-target
+# resources are Azure Service Operator (ASO) CRDs realized against REAL Azure via
+# Azure ARM. Unlike gcp-prod there is no emulator - ASO always drives ARM and
+# floci-az is data-plane only. See providers/azure-prod/host/README.md.
+# Not part of the default `setup` chain (installs cert-manager + ASO); opt in via
+# `setup.bash azure-prod`. Requires a real Azure service principal supplied in
+# providers/azure-prod/host/aso-controller-settings.secret.yaml (gitignored).
+#
+# The four ASO storage CRDs the blueprint targets - kro type-checks blueprint
+# children against the workspace API surface (same reason gcp-prod applies the
+# Bucket CRD there).
+# crdPattern: only the CRD groups the blueprint needs. This scopes both what the
+# ASO chart installs on the host AND what _provider_azure_prod copies into the
+# workspace (every installed *.azure.com CRD), so there is no separate CRD list to
+# keep in sync.
+ASO_CRD_PATTERN="${ASO_CRD_PATTERN:-resources.azure.com/*;storage.azure.com/*}"
+
+_host_azure_prod() {
+    # Credential convention (shared with gcp-prod): the real settings file is
+    # gitignored and REQUIRED - azure-prod provisions against real Azure, no fake
+    # fallback. Copy the .example and supply a service principal.
+    local aso_secret=./providers/azure-prod/host/aso-controller-settings.secret.yaml
+    [[ -f "$aso_secret" ]] \
+        || die "missing $aso_secret - copy aso-controller-settings.secret.example.yaml and supply an Azure service principal (see providers/azure-prod/host/README.md)"
+
+    log "Ensuring cert-manager is present (ASO prerequisite)"
+    helm::install::certmanager "$kind_platform" \
+        -n cert-manager --wait --timeout "$timeout" \
+        || die "cert-manager install failed"
+
+    log "Installing Azure Service Operator (host)"
+    helm::repo aso2 https://raw.githubusercontent.com/Azure/azure-service-operator/main/v2/charts
+    # We manage the aso-controller-settings secret ourselves (from the gitignored
+    # file), so tell the chart NOT to create it (createAzureOperatorSecret=false) -
+    # otherwise Helm claims ownership of the secret and a plain kubectl apply
+    # collides. Apply the secret before the chart so the controller has creds on
+    # first start.
+    kubectl --kubeconfig "$kind_platform" create namespace azureserviceoperator-system \
+        --dry-run=client -o yaml \
+        | kubectl --kubeconfig "$kind_platform" apply -f-
+    kubectl::apply "$kind_platform" "$aso_secret"
+    helm --kubeconfig "$kind_platform" upgrade --install aso2 \
+        aso2/azure-service-operator \
+        -n azureserviceoperator-system --create-namespace \
+        --set createAzureOperatorSecret=false \
+        --set crdPattern="$ASO_CRD_PATTERN" \
+        --wait --timeout "$timeout" \
+        || die "Azure Service Operator install failed"
+    kubectl::wait "$kind_platform" \
+        deployment/azureserviceoperator-controller-manager \
+        azureserviceoperator-system condition=Available
+}
+
+_provider_azure_prod() {
+    local kind_namespace="azure-prod"
+    local ws_admin="$kubeconfigs/workspaces/azure-prod.admin.kubeconfig"
+    kcp::create_workspace "$kcp_admin" "$ws_admin" "azure-prod"
+    _krop azure-prod root:azure-prod "$ws_admin" "$kind_namespace"
+
+    # kro type-checks blueprint children against the workspace API surface - the
+    # ASO CRDs must exist in the workspace. They are installed on the host by
+    # _host_azure_prod (ASO chart, scoped by crdPattern); copy every installed
+    # *.azure.com CRD into the workspace:
+    #   - strip the conversion webhook (it points at the host ASO service, which
+    #     the kcp workspace cannot reach)
+    #   - server-side apply (no last-applied-config annotation, so the large
+    #     multi-version ASO CRDs stay under the 256KB annotation limit)
+    local crd crds
+    crds="$(kubectl --kubeconfig "$kind_platform" get crd -o name \
+        | grep -E '\.(resources|storage)\.azure\.com$')" \
+        || die "no ASO CRDs found on the host - did the ASO chart install?"
+    for crd in $crds; do
+        kubectl --kubeconfig "$kind_platform" get "$crd" -o yaml \
+            | yq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status)
+                  | .spec.conversion = {"strategy": "None"}' \
+            | KUBECONFIG="$ws_admin" kubectl apply --server-side --force-conflicts -f - \
+            || die "failed to install ASO CRD $crd into root:azure-prod"
+        KUBECONFIG="$ws_admin" kubectl wait --for=condition=Established \
+            "$crd" --timeout="$timeout" \
+            || die "ASO CRD $crd not established in root:azure-prod"
+    done
+
+    krop::register azure-prod "$ws_admin"
+}
+
 _object_storage_migrator() {
     local image="localhost/object-storage-migrator:latest"
     log "Building $image"
@@ -590,29 +690,101 @@ _setup() {
     _platform_apis
     _broker
     _object_storage_migrator
-    _floci # deploy floci instances in the kind cluster
-    # Path B (the decided architecture): krop-controller per provider workspace,
-    # blueprint-resident realization, no api-syncagent.
-    _provider_gcp
-    _provider_aws
-    _provider_azure
-    # gcp (eu), aws (us) and azure (ap) all carry blueprints + AcceptAPIs - the
-    # broker migration demo is self-contained: patch an order's region between
-    # eu, us and ap (see providers/aws/README.md for the us walkthrough).
-    _consumer
-    # Keep instance names short until opendefensecloud/krop-controller#8 is fixed.
-    #
-    # The syncagent-based Path A remains available for comparison via
-    # `setup.bash syncagent-gcp` (uses the same root:gcp workspace — the
-    # AcceptAPIs of both paths must not be registered for the same region at
-    # the same time, or broker routing becomes ambiguous).
     log "Setup complete: order routed through the broker to the krop gcp provider."
     log "Marketplace view:"
     log "  kubectl --kubeconfig $ws_provider get apiexports,contentconfigurations,providermetadatas"
 }
 
+# only setup mocked providers with floci
+_setup_mock_providers() {
+    # Path B (the decided architecture): krop-controller per provider workspace,
+    # blueprint-resident realization, no api-syncagent.
+    _floci # deploy floci instances in the kind cluster
+    _provider_gcp
+    _provider_aws
+    _provider_azure
+}
+
+# setup real providers with credentials
+_setup_prod_providers() {
+    _provider_gcp_prod
+    _provider_azure_prod
+}
+
+# _teardown_krop <provider> removes a krop-controller deployed by _krop: the
+# kustomize release + admin RBAC on the host, and the provider namespace.
+_teardown_krop() {
+    local provider="$1"
+    log "Removing krop-controller for $provider (host)"
+    kustomize build --enable-helm "./providers/krop/$provider" \
+        | kubectl --kubeconfig "$kind_platform" delete -f- --ignore-not-found --wait=false \
+        || log "krop-controller for $provider already gone"
+    kubectl --kubeconfig "$kind_platform" delete namespace "$provider" \
+        --ignore-not-found --wait=false || true
+}
+
+# teardown-mock reverses _setup_mock_providers: the gcp/aws/azure provider
+# workspaces (cascades blueprints/exports/bindings), their krop-controllers +
+# namespaces, and the floci backends.
+_teardown_mock_providers() {
+    local p
+    for p in gcp aws azure; do
+        kcp::delete_workspace "$kcp_admin" "$p"
+        _teardown_krop "$p"
+    done
+    log "Removing floci backends"
+    kubectl --kubeconfig "$kind_platform" delete -k ./kind/manifests \
+        --ignore-not-found --wait=false || log "floci already gone"
+}
+
+# teardown-prod reverses _setup_prod_providers: first GC the real cloud resources
+# (delete ObjectStorage orders so ASO/Crossplane tear down via owner refs), then
+# the provider workspaces + krop-controllers, then the host operators.
+_teardown_prod_providers() {
+    log "Deleting real cloud resources (ASO/Crossplane) before removing operators"
+    # Best-effort: delete any ObjectStorage orders so the broker unwinds them.
+    KUBECONFIG="$ws_consumer" kubectl delete objectstorage --all -A --ignore-not-found --wait=false 2>/dev/null || true
+    # Authoritative GC for Azure: delete the ASO ResourceGroups on the host - owner
+    # refs cascade to StorageAccount -> BlobService -> Container, and ASO deletes
+    # the real Azure resources. Do this directly so it works even without a
+    # consumer workspace (broker-routed orders live in staging).
+    kubectl --kubeconfig "$kind_platform" delete resourcegroups.resources.azure.com \
+        --all -A --ignore-not-found --wait=false 2>/dev/null || true
+    log "Waiting for ASO Azure resources to be deleted (owner-ref GC)"
+    kubectl --kubeconfig "$kind_platform" wait --for=delete \
+        storageaccounts.storage.azure.com,resourcegroups.resources.azure.com \
+        -A --all --timeout="$timeout" 2>/dev/null \
+        || log "no ASO resources pending (or timed out - check the Azure portal / az)"
+
+    local p
+    for p in gcp-prod azure-prod; do
+        kcp::delete_workspace "$kcp_admin" "$p"
+        _teardown_krop "$p"
+    done
+
+    log "Uninstalling Azure Service Operator (host)"
+    helm --kubeconfig "$kind_platform" uninstall aso2 \
+        -n azureserviceoperator-system --ignore-not-found --wait || true
+    kubectl --kubeconfig "$kind_platform" delete namespace azureserviceoperator-system \
+        --ignore-not-found --wait=false || true
+
+    log "Uninstalling Crossplane + provider-terraform (host)"
+    helm --kubeconfig "$kind_platform" uninstall crossplane \
+        -n crossplane-system --ignore-not-found --wait || true
+    kubectl --kubeconfig "$kind_platform" delete namespace crossplane-system gcp-system \
+        --ignore-not-found --wait=false || true
+
+    # cert-manager is shared/pre-existing from the Platform Mesh local-setup - we
+    # skipped installing it, so we do not remove it.
+    log "Leaving cert-manager in place (shared with the local-setup)"
+}
+
 case "${1:-setup}" in
     (setup) _setup ;;
+    (setup-mock) _kubeconfig; _setup_mock_providers ;;
+    (setup-prod) _kubeconfig; _setup_prod_providers ;;
+    (teardown-mock) _kubeconfig; _kcp; _teardown_mock_providers ;;
+    (teardown-prod) _kubeconfig; _kcp; _teardown_prod_providers ;;
     (kubeconfig) _kubeconfig; _kcp ;;
     (broker) _kubeconfig; _kcp; _broker ;;
     (gcp) _kubeconfig; _kcp; _provider_gcp ;;
@@ -621,5 +793,6 @@ case "${1:-setup}" in
     (consumer) _kubeconfig; _kcp; _consumer ;;
     (krop-providers) _kubeconfig; _kcp; _provider_gcp; _provider_aws; _provider_azure ;;
     (gcp-prod) _kubeconfig; _kcp; _host_gcp_prod; _provider_gcp_prod ;;
-    (*) die "Unknown command: $1 (want: setup | kubeconfig | broker | gcp | aws | syncagent-gcp | consumer | krop-providers | gcp-prod)" ;;
+    (azure-prod) _kubeconfig; _kcp; _host_azure_prod; _provider_azure_prod ;;
+    (*) die "Unknown command: $1 (want: setup | setup-mock | setup-prod | teardown-mock | teardown-prod | kubeconfig | broker | gcp | aws | syncagent-gcp | consumer | krop-providers | gcp-prod | azure-prod)" ;;
 esac

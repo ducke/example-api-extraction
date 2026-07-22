@@ -271,6 +271,10 @@ helm::install() {
 helm::install::certmanager() {
     local kubeconfig="$1"
     shift 1
+    if kubectl --kubeconfig "$kubeconfig" get crd certificates.cert-manager.io >/dev/null 2>&1; then
+        log "cert-manager already installed - skipping"
+        return 0
+    fi
     helm::install "$kubeconfig" \
         cert-manager oci://quay.io/jetstack/charts/cert-manager:v1.19.1 \
           --set crds.enabled=true \
@@ -621,6 +625,18 @@ kcp::create_workspace() {
             workspace "$wsname" --timeout="$timeout" \
             || die "Timed out waiting for workspace $wsname to become Ready"
     rm -f "$check_kubeconfig"
+}
+
+kcp::delete_workspace() {
+    local parent_kubeconfig="$1"
+    [[ -z "$parent_kubeconfig" ]] && die "parent_kubeconfig is required"
+    local wsname="$2"
+    [[ -z "$wsname" ]] && die "wsname is required"
+
+    log "Deleting workspace $wsname (async)"
+    KUBECONFIG="$parent_kubeconfig" kubectl delete workspace "$wsname" \
+        --ignore-not-found --wait=false \
+        || die "Failed to delete workspace $wsname"
 }
 
 kcp::apiexport() {
