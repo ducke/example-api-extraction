@@ -11,7 +11,8 @@ helmCharts:
     namespace: azure
     valuesInline:
       image:
-        tag: 0.1.0
+        repository: ghcr.io/ntnn/krop-controller
+        tag: hackathon-1
       kcp:
         kubeconfigSecret:
           name: krop-kubeconfig
