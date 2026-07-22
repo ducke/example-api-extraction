@@ -21,6 +21,9 @@ spec:
             - -kcp-kubeconfig=/kubeconfig/kubeconfig
             - -compute-kubeconfig=/compute-kubeconfig/kubeconfig
             - -acceptapi=acceptapis
+            - -coordination-workspace=root:resource-broker
+            - -staging-tree-root=root:resource-broker:staging
+            - -verification-tree-root=root:resource-broker:verification
             - -requeue-interval=1s
           volumeMounts:
             - name: kubeconfig
@@ -36,3 +39,13 @@ spec:
         - name: compute-kubeconfig
           configMap:
             name: compute-kubeconfig
+      hostAliases:
+        - ip: "10.96.188.4"
+          hostnames:
+            - "localhost"
+            - "portal.localhost"
+            - "kcp.localhost"
+            - "root.kcp.localhost"
+            - "kcp.api.portal.localhost"
+            - "nereus.kcp.localhost"
+            - "triton.kcp.localhost"
