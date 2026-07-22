@@ -627,6 +627,18 @@ kcp::create_workspace() {
     rm -f "$check_kubeconfig"
 }
 
+kcp::delete_workspace() {
+    local parent_kubeconfig="$1"
+    [[ -z "$parent_kubeconfig" ]] && die "parent_kubeconfig is required"
+    local wsname="$2"
+    [[ -z "$wsname" ]] && die "wsname is required"
+
+    log "Deleting workspace $wsname (async)"
+    KUBECONFIG="$parent_kubeconfig" kubectl delete workspace "$wsname" \
+        --ignore-not-found --wait=false \
+        || die "Failed to delete workspace $wsname"
+}
+
 kcp::apiexport() {
     local kubeconfig="$1"
     local crd_file="$2"
