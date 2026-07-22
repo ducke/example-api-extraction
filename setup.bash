@@ -437,7 +437,7 @@ _provider_gcp() {
     kubectl::kustomize "$kind_platform" ./kind/manifests
 
     log "Publishing the ObjectStorage blueprint (gcp)"
-    kubectl::apply "$ws_admin" ./providers/krop/gcp/blueprint-objectstorage.yaml
+    kubectl::apply "$ws_admin" ./providers/gcp/manifests/blueprint-objectstorage.yaml
     KUBECONFIG="$ws_admin" kubectl wait rgd.krop.opendefense.cloud/objectstorage \
         --for=jsonpath='{.status.exportedAPI}'=objectstorages.storage.example.io \
         --timeout="$timeout" \
