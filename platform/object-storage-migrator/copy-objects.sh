@@ -42,6 +42,9 @@ setenv() {
             export "RCLONE_CONFIG_${remote_upper}_KEY=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
             export "RCLONE_CONFIG_${remote_upper}_ENDPOINT=http://${floci_az}/devstoreaccount1"
             ;;
+        (local://*)
+            export "RCLONE_CONFIG_${remote_upper}_TYPE=local"
+            ;;
         *)
             echo "unsupported protocol: $uri" >&2
             exit 1
