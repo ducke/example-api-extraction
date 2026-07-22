@@ -184,31 +184,58 @@ _consumer() {
         ./consumer/order-object.yaml
 }
 
-_kro() {
+_krop() {
     local provider="$1"
     local ws_path="$2"
     local ws_admin="$3"
-    shift 3
+    local kind_namespace="$4"
 
-    log "Installing the kro CRDs into $ws_path"
-    kubectl apply --kubeconfig "$ws_admin" \
-        -f "https://raw.githubusercontent.com/kubernetes-sigs/kro/main/helm/crds/kro.run_resourcegraphdefinitions.yaml"
+    local krop_kubeconfig="$kubeconfigs/workspaces/gcp.krop.kubeconfig"
 
-    log "Create in-cluster kubeconfig for kro targeting the workspace"
-    local ws_incluster="$kubeconfigs/workspaces/${provider}.kubeconfig"
-    kcp::kubeconfig::workspace "$kcp_admin" "$ws_incluster" "$ws_path" "$PM_KCP_INCLUSTER"
+    # setup RBAC in kcp, we are reusing the same service account for all providers
+    kubectl --kubeconfig "$kcp_admin" apply -f ./providers/krop/kcp-root-rbac.yaml
+    kubectl --kubeconfig "$ws_admin" apply -f ./providers/krop/kcp-provider-rbac.yaml
 
-    log "Installing kro for the $provider provider workspace"
-    helm::install::kro::workspace "$kind_platform" \
-        "kro-${provider}" \
-        "$ws_incluster" \
-        "kro-${provider}-system" \
-        "kro-kubeconfig"
+    # create a kubectl and store it as a secret for krop-controller to use
+    kubectl --kubeconfig "$kind_platform" apply \
+        -f ./providers/krop/kind-kubectl.yaml
 
-    kubectl::wait "$kind_platform" \
-        deployment/kro-${provider} \
-        "kro-${provider}-system" \
-        condition=Available
+    # export the host and rewrite the target host at the same time
+    # rewrite at the same time because mac defaults to non-gnu sed and
+    # tahts annoying
+    kubectl --kubeconfig "$kind_platform" \
+        -n platform-mesh-system \
+        get secrets krop-controller-kubeconfig \
+        -o jsonpath='{.data.kubeconfig}' \
+        | base64 -d \
+        | sed -e "s#root.kcp.localhost#frontproxy-front-proxy.platform-mesh-system.svc.cluster.local#g" \
+        | sed -e "s#/clusters/root#/clusters/root:$provider#g" \
+        > "$krop_kubeconfig"
+
+    kubectl create namespace "$kind_namespace" \
+        --dry-run=client -o yaml \
+        | kubectl --kubeconfig "$kind_platform" apply -f-
+
+    kubectl -n "$kind_namespace" create secret generic krop-kubeconfig \
+        --from-file=kubeconfig="$krop_kubeconfig" \
+        --dry-run=client -o yaml \
+        | kubectl --kubeconfig "$kind_platform" apply -f-
+
+    kustomize build --enable-helm "./providers/krop/$provider" \
+        | kubectl --kubeconfig "$kind_platform" apply -f- \
+        || die "Failed to deploy krop-controller for $provider"
+
+    kubectl --kubeconfig "$ws_admin" apply -f ./providers/krop/kcp-provider-crd.yaml
+    # As noted in https://github.com/platform-mesh/example-api-extraction/pull/10#issuecomment-5043180426
+    # The krop-controller engages the clients with all control planes so
+    # deploying a job resource fails unless the kcp workspace has the
+    # Job API resource.
+    # To prevent this we install the job CRD even though it isn't used.
+    # TODO(ntnn): Report upstream.
+    kubectl --kubeconfig "$ws_admin" apply -f ./providers/krop/kcp-provider-crd-jobs.yaml
+
+    # then create an RGD like described here:
+    # https://github.com/opendefensecloud/krop-controller/blob/main/docs/getting-started.md#3a-install-the-blueprint-crd-into-the-provider-workspace
 }
 
 _floci() {
@@ -224,9 +251,10 @@ _floci() {
 
 # _provider_X creates the provider's kcp workspace, then wires kro to it.
 _provider_gcp() {
+    local kind_namespace="gcp"
     local ws_admin="$kubeconfigs/workspaces/gcp.admin.kubeconfig"
     kcp::create_workspace "$kcp_admin" "$ws_admin" "gcp"
-    _kro gcp root:gcp "$ws_admin"
+    _krop gcp root:gcp "$ws_admin" "$kind_namespace"
 
     log "Deploy floci gcp"
     _floci floci-gcp -p 4588:4588 \
@@ -234,9 +262,10 @@ _provider_gcp() {
 }
 
 _provider_aws() {
+    local kind_namespace="aws"
     local ws_admin="$kubeconfigs/workspaces/aws.admin.kubeconfig"
     kcp::create_workspace "$kcp_admin" "$ws_admin" "aws"
-    _kro aws root:aws "$ws_admin"
+    _krop aws root:aws "$ws_admin" "$kind_namespace"
 
     log "Deploy floci aws"
     # All 68 services on :4566
@@ -246,9 +275,10 @@ _provider_aws() {
 }
 
 _provider_azure() {
+    local kind_namespace="azure"
     local ws_admin="$kubeconfigs/workspaces/azure.admin.kubeconfig"
     kcp::create_workspace "$kcp_admin" "$ws_admin" "azure"
-    _kro azure root:azure "$ws_admin"
+    _krop azure root:azure "$ws_admin" "$kind_namespace"
 
     log "Deploy floci azure"
     # REST :4577 · Event Hubs AMQP :5672 · Service Bus AMQP :5673
