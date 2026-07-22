@@ -675,29 +675,31 @@ _setup() {
     _platform_apis
     _broker
     _object_storage_migrator
-    _floci # deploy floci instances in the kind cluster
-    # Path B (the decided architecture): krop-controller per provider workspace,
-    # blueprint-resident realization, no api-syncagent.
-    _provider_gcp
-    _provider_aws
-    _provider_azure
-    # gcp (eu), aws (us) and azure (ap) all carry blueprints + AcceptAPIs - the
-    # broker migration demo is self-contained: patch an order's region between
-    # eu, us and ap (see providers/aws/README.md for the us walkthrough).
-    _consumer
-    # Keep instance names short until opendefensecloud/krop-controller#8 is fixed.
-    #
-    # The syncagent-based Path A remains available for comparison via
-    # `setup.bash syncagent-gcp` (uses the same root:gcp workspace — the
-    # AcceptAPIs of both paths must not be registered for the same region at
-    # the same time, or broker routing becomes ambiguous).
     log "Setup complete: order routed through the broker to the krop gcp provider."
     log "Marketplace view:"
     log "  kubectl --kubeconfig $ws_provider get apiexports,contentconfigurations,providermetadatas"
 }
 
+# only setup mocked providers with floci
+_setup_mock_providers() {
+    # Path B (the decided architecture): krop-controller per provider workspace,
+    # blueprint-resident realization, no api-syncagent.
+    _floci # deploy floci instances in the kind cluster
+    _provider_gcp
+    _provider_aws
+    _provider_azure
+}
+
+# setup real providers with credentials
+_setup_prod_providers() {
+    _provider_gcp_prod
+    _provider_azure_prod
+}
+
 case "${1:-setup}" in
     (setup) _setup ;;
+    (setup-mock) _kubeconfig; _setup_mock_providers ;;
+    (setup-prod) _kubeconfig; _setup_prod_providers ;;
     (kubeconfig) _kubeconfig; _kcp ;;
     (broker) _kubeconfig; _kcp; _broker ;;
     (gcp) _kubeconfig; _kcp; _provider_gcp ;;
