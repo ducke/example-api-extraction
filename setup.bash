@@ -727,6 +727,14 @@ _teardown_krop() {
 # workspaces (cascades blueprints/exports/bindings), their krop-controllers +
 # namespaces, and the floci backends.
 _teardown_mock_providers() {
+    log "Deleting consumer orders"
+    KUBECONFIG="$ws_consumer" kubectl delete objectstorage --all -A \
+        --ignore-not-found --wait=false 2>/dev/null || true
+    log "Wait for consumer resources to be drained"
+    KUBECONFIG="$ws_consumer" kubectl wait objectstorage --all -A --for=delete \
+        --timeout="$timeout" 2>/dev/null \
+        || log "consumer orders not fully drained"
+
     local p
     for p in gcp aws azure; do
         kcp::delete_workspace "$kcp_admin" "$p"
@@ -741,9 +749,12 @@ _teardown_mock_providers() {
 # (delete ObjectStorage orders so ASO/Crossplane tear down via owner refs), then
 # the provider workspaces + krop-controllers, then the host operators.
 _teardown_prod_providers() {
-    log "Deleting real cloud resources (ASO/Crossplane) before removing operators"
-    # Best-effort: delete any ObjectStorage orders so the broker unwinds them.
+    log "Deleting consumer orders"
     KUBECONFIG="$ws_consumer" kubectl delete objectstorage --all -A --ignore-not-found --wait=false 2>/dev/null || true
+    KUBECONFIG="$ws_consumer" kubectl wait objectstorage --all -A --for=delete \
+        --timeout="$timeout" 2>/dev/null \
+        || log "consumer orders not fully drained"
+
     # Authoritative GC for Azure: delete the ASO ResourceGroups on the host - owner
     # refs cascade to StorageAccount -> BlobService -> Container, and ASO deletes
     # the real Azure resources. Do this directly so it works even without a
