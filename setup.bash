@@ -211,8 +211,14 @@ _krop() {
         | kubectl --kubeconfig "$kind_platform" apply -f- \
         || die "Failed to deploy krop-controller for $provider"
 
-    kubectl --kubeconfig "$ws_admin" apply \
-        -f ./providers/krop/kcp-provider-crd.yaml
+    kubectl --kubeconfig "$ws_admin" apply -f ./providers/krop/kcp-provider-crd.yaml
+    # As noted in https://github.com/platform-mesh/example-api-extraction/pull/10#issuecomment-5043180426
+    # The krop-controller engages the clients with all control planes so
+    # deploying a job resource fails unless the kcp workspace has the
+    # Job API resource.
+    # To prevent this we install the job CRD even though it isn't used.
+    # TODO(ntnn): Report upstream.
+    kubectl --kubeconfig "$ws_admin" apply -f ./providers/krop/kcp-provider-crd-jobs.yaml
 
     # then create an RGD like described here:
     # https://github.com/opendefensecloud/krop-controller/blob/main/docs/getting-started.md#3a-install-the-blueprint-crd-into-the-provider-workspace
