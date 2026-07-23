@@ -708,6 +708,7 @@ _setup_mock_providers() {
 # setup real providers with credentials
 _setup_prod_providers() {
     _provider_gcp_prod
+    _host_azure_prod
     _provider_azure_prod
 }
 
