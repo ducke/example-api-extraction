@@ -14,7 +14,6 @@ spec:
   stages:
     - name: copy
       preconditions:
-        # TODO need to define the "healthy" status
         - to.status.status == "Available"
       successConditions:
         - has(dump.status.succeeded) && dump.status.succeeded >= 1
